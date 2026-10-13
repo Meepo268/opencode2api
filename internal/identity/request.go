@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"time"
 
 	"opencode2api/internal/jsonutil"
 )
@@ -53,7 +54,7 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	)
 	return RequestIDs{
 		Session:       session,
-		Request:       RandomID("req", 16),
+		Request:       NewZenRequestID(),
 		Project:       StableID("prj", projectSignal),
 		ParentSession: parentSession,
 	}
@@ -98,6 +99,10 @@ var canonicalSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{1
 // exactly that window.
 var descendingTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
 
+// canonicalRequestPattern mirrors the session shape for request IDs:
+// "msg_" + 12 lowercase hex characters + 14 Base62 characters.
+var canonicalRequestPattern = regexp.MustCompile(`^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // CanonicalSessionID returns signal unchanged when it already carries an
@@ -136,6 +141,27 @@ func descendingTimePart(hash []byte) string {
 		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),
 		byte(inverted >> 16), byte(inverted >> 8), byte(inverted),
 	})
+}
+
+// NewZenRequestID mints an x-opencode-request value in the official client's
+// ascending-timestamp shape ("msg_" + ascending 12 hex + 14 Base62), one per
+// upstream request. The OpenCode client encodes request time as
+// unix_ms*0x1000+counter without applying the session's bitwise inversion.
+// The counter is fixed at 1: live-endpoint probing (see
+// descendingTimePartPattern) shows the free tier only tolerates small
+// counters, and the 14-char random tail already guarantees per-request
+// uniqueness. Zen currently validates only the session's timestamp, but the
+// request header is the next plausible checkpoint, and sending the canonical
+// shape costs nothing while keeping the gateway indistinguishable from
+// the CLI.
+func NewZenRequestID() string {
+	current := uint64(time.Now().UnixMilli())*0x1000 + 1
+	buf := make([]byte, 14)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	randomPart := base62Fixed(new(big.Int).SetBytes(buf), 14)
+	return "msg_" + fmt.Sprintf("%012x", current&0xFFFFFFFFFFFF) + randomPart
 }
 
 func base62Fixed(n *big.Int, width int) string {
