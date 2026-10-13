@@ -20,6 +20,7 @@ type EffortProbe struct {
 type Availability struct {
 	Model           string      `json:"model"`
 	Disabled        bool        `json:"disabled"`
+	Hidden          bool        `json:"hidden,omitempty"`
 	CheckedAt       time.Time   `json:"checked_at,omitempty"`
 	NextCheck       time.Time   `json:"next_check"`
 	Reason          string      `json:"reason,omitempty"`

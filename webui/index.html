@@ -100,6 +100,7 @@
               小时后重试，已禁用模型保留原原因并在 24
               小时后重试。恢复启用或切为手动后，该模型保持启用且不再自动探测；切回自动后，下一轮调度即安排探测。
               System One 使用专用的 1+1 决策问题。设置 auto 强度后，显示探测验证过的最高档位。
+              “刷新状态”只重读快照，不会立即触发探测；在途探测约 1 分钟一轮。
             </p>
             <p id="availability-error" role="status"></p>
             <div class="table-wrap">
@@ -119,6 +120,26 @@
                 <tbody id="availability-models"></tbody>
               </table>
             </div>
+            <details id="availability-hidden-wrap">
+              <summary id="availability-hidden-summary">已隐藏模型</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th>状态</th>
+                      <th>通道 / 结果</th>
+                      <th>控制</th>
+                      <th>已验证思考档位</th>
+                      <th>上次探测</th>
+                      <th>下次探测</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="availability-hidden-models"></tbody>
+                </table>
+              </div>
+            </details>
           </div>
         </section>
         <section id="page-overview" class="page">
@@ -406,7 +427,7 @@
                 <h2>模型路由表</h2>
                 <div class="section-caption">显式协议、匿名资格来源与成本判断。</div>
               </div>
-              <input id="diagnostic-model-search" placeholder="筛选模型" />
+              <input id="diagnostic-model-search" placeholder="筛选模型" value="free" />
             </div>
             <div class="table-wrap">
               <table class="table">
@@ -417,6 +438,7 @@
                     <th>路由</th>
                     <th>匿名资格</th>
                     <th>判断来源</th>
+                    <th>思考档位</th>
                     <th>成本 input / output</th>
                   </tr>
                 </thead>
@@ -444,6 +466,8 @@
                     <th>通道</th>
                     <th>Key 尾码</th>
                     <th>尝试</th>
+                    <th>思考</th>
+                    <th>流式</th>
                     <th>状态</th>
                     <th>耗时</th>
                   </tr>
@@ -471,6 +495,7 @@
                     <th>通道</th>
                     <th>Key 尾码</th>
                     <th>代理节点</th>
+                    <th>思考</th>
                     <th>状态</th>
                     <th>耗时</th>
                   </tr>
@@ -559,6 +584,84 @@
                 <div class="field">
                   <label>Proxy File</label><input id="c-proxyfile" placeholder="proxies.txt" />
                 </div>
+                <div class="field full">
+                  <label>按模型指定代理池（同一行即同一规则）</label>
+                  <div class="section-caption">
+                    一行 = 一个模型走一个专属池。先选模型，再选出口，最后点加入：三者在同一行，即同一个单元。
+                  </div>
+                  <div class="form-grid pbm-grid">
+                    <div class="field">
+                      <label>模型 ID（下拉选，或手填，`*` 通配）</label
+                      ><input id="pbm-new-model" list="pbm-model-list" placeholder="A模型ID" />
+                      <datalist id="pbm-model-list"></datalist>
+                      <div class="section-caption">
+                        候选来自模型目录。<button
+                          id="pbm-model-scope"
+                          type="button"
+                          class="ghost"
+                        >
+                          只看 free
+                        </button>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label>出口（列表多选，按住 Ctrl/Shift，列表顺序即优先级）</label
+                      ><select id="pbm-new-proxies" multiple size="4"></select>
+                    </div>
+                    <div class="field pbm-add-field">
+                      <label>&nbsp;</label>
+                      <button id="pbm-add" type="button" class="ghost">加入 / 更新</button>
+                    </div>
+                  </div>
+                  <div id="pbm-rows" class="table-wrap"></div>
+                  <label>JSON（构造器会自动写入此处，也可直接粘贴）</label
+                  ><textarea
+                    id="c-proxy-by-model"
+                    spellcheck="false"
+                    placeholder='{"A模型ID":["http://us1:7890","http://us2:7890"],"B模型ID":["direct"]}'
+                  ></textarea>
+                  <div class="section-caption">
+                    精确模型 ID 优先，其次 `*` 通配，未命中走全局池。列表存的是代理指纹（不暴露密码），保存时后端自动还原原文；带密码代理也可直接在 JSON 粘原文。
+                  </div>
+                </div>
+                <div class="field">
+                  <label>代理池重试次数（0 跟随 Key Tier 次数）</label
+                  ><input id="c-proxy-retry-attempts" type="number" min="0" max="10" />
+                </div>
+                <div class="field">
+                  <label>代理池重试间隔（秒，0 立即）</label
+                  ><input id="c-proxy-retry-interval" type="number" min="0" max="60" />
+                </div>
+                <div class="field full">
+                  <label>模型路由 A→B（A 挂了自动转 B，只跳一次）</label>
+                  <div class="section-caption">
+                    示例：A 是只能走美国代理的模型，B
+                    是全球直连模型。A 把自己的代理池用尽仍失败（网络不通 / 5xx /
+                    限流）时，自动用同一份请求内容试一次 B；`400参数错`、超时耗尽、单
+                    Key 诊断不跳。不填 = A 模式（直接报错），填了 = B 模式（转路由）。
+                  </div>
+                  <div class="form-grid pbm-grid">
+                    <div class="field">
+                      <label>主模型 A（下拉选，或手填）</label
+                      ><input id="fb-new-from" list="pbm-model-list" placeholder="A模型ID" />
+                    </div>
+                    <div class="field">
+                      <label>路由模型 B（下拉选，或手填）</label
+                      ><input id="fb-new-to" list="pbm-model-list" placeholder="B模型ID" />
+                    </div>
+                    <div class="field pbm-add-field">
+                      <label>&nbsp;</label>
+                      <button id="fb-add" type="button" class="ghost">加入 / 更新</button>
+                    </div>
+                  </div>
+                  <div id="fb-rows" class="table-wrap"></div>
+                  <label>JSON（构造器会自动写入此处，也可直接粘贴，示例 {"A模型":"B模型"}）</label
+                  ><textarea
+                    id="c-model-fallback"
+                    spellcheck="false"
+                    placeholder='{"A模型ID":"B模型ID"}'
+                  ></textarea>
+                </div>
               </div>
             </div>
             <div class="section">
@@ -585,6 +688,15 @@
                 <div class="field">
                   <label>模型协议覆盖（JSON）</label
                   ><textarea id="c-protocols" spellcheck="false">{}</textarea>
+                </div>
+                <div class="field full">
+                  <label>隐藏模型（JSON 数组，不暴露、不探测）</label
+                  ><textarea
+                    id="c-hidden"
+                    spellcheck="false"
+                    placeholder='["弱模型A"]'
+                  ></textarea>
+                  <div class="section-caption">新发现模型默认自动暴露，填入此处即屏蔽。</div>
                 </div>
               </div>
             </div>
@@ -623,6 +735,18 @@
                   <div class="section-caption">
                     值可为 minimal、low、medium、high、xhigh、max 或 none；空对象表示不覆盖。
                   </div>
+                </div>
+                <div class="field full">
+                  <label>自动探测结果（只读展示，一键写入覆盖）</label>
+                  <div class="section-caption">
+                    `auto` 档是探测器对免费 Zen 模型逐档试出来的“最高可用档”，有效期约
+                    2 小时、过期重探。这里**不自动写入配置**（写死了反而会过期失效）；确认合适再点“写入”，之后人工改
+                    JSON 即锁定该模型，不再跟随探测。
+                  </div>
+                  <div class="actions">
+                    <button id="effort-refresh" type="button" class="ghost">刷新探测结果</button>
+                  </div>
+                  <div id="effort-auto-rows" class="table-wrap"></div>
                 </div>
               </div>
             </div>
@@ -776,6 +900,10 @@
               </div>
               <button id="rotation-refresh" class="ghost">刷新状态</button>
             </div>
+            <p class="section-caption">
+              怎么用（三步）：1）在下面两组里排好顺序（上移/下移），2）点“保存别名与顺序”，3）把客户端的
+              `OPENAI_MODEL` 改成别名 `sota` 或 `sweet`。之后请求打到别名即按顺序试模型：成功就粘住当前模型；普通错误换下一个；额度不足直接跳过。
+            </p>
             <p class="section-caption">
               沿用现有 Base URL 和 API Key，将 OPENAI_MODEL 设为下方别名。每个模型普通错误最多尝试 3
               次，一次请求最多重试 3 个模型；额度不足直接跳过。

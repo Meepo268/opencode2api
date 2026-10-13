@@ -609,6 +609,25 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 18px;
 }
+/* Builder rows: model + exits + button read as one unit on one line. */
+.pbm-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) auto;
+  align-items: end;
+}
+.pbm-add-field {
+  margin-bottom: 13px;
+}
+.pbm-add-field button {
+  white-space: nowrap;
+}
+#pbm-new-proxies {
+  min-height: 92px;
+}
+#pbm-new-model,
+#fb-new-from,
+#fb-new-to {
+  min-width: 220px;
+}
 .full {
   grid-column: 1/-1;
 }

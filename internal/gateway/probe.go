@@ -19,7 +19,10 @@ import (
 type probeResult struct {
 	success, attempted, effortRejected bool
 	reason, channel                    string
-	effort                             models.EffortProbe
+	// proxy is the redacted exit that served the reported attempt, so a
+	// per-IP 403/429 can be told apart from a broken proxy or a bad model.
+	proxy  string
+	effort models.EffortProbe
 }
 
 func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.Protocol) string {
@@ -65,6 +68,9 @@ func probePayload(model string, protocol wire.Protocol, effort string) ([]byte, 
 }
 
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
+	if g.cfg.IsHiddenModel(model) || g.catalog.IsHidden(model) {
+		return probeResult{reason: "hidden"}
+	}
 	if !g.catalog.IsFreeModel(model) {
 		return probeResult{reason: "not_free"}
 	}
@@ -77,18 +83,35 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	type lane struct {
 		key, name string
 		client    *http.Client
+		proxy     string
 	}
 	var lanes []lane
 	if g.cfg.Anonymous {
+		// Scan every healthy anonymous exit, not just the affinity-pinned
+		// first one: the anonymous lane is rate-limited per exit IP, so one
+		// quota-exhausted exit must not fail the whole model while others
+		// serve it fine (real traffic spreads across all of them).
 		cursor := g.anonymous.CursorFor(ids.Session)
-		if node := cursor.Next(); node != nil {
-			lanes = append(lanes, lane{anonymousZenKey, "anonymous", node.proxy.client})
+		for attempt := 0; attempt < g.anonymous.Len(); attempt++ {
+			node := cursor.Next()
+			if node == nil {
+				break
+			}
+			lanes = append(lanes, lane{anonymousZenKey, "anonymous", node.proxy.client, config.RedactURL(node.proxy.name)})
 		}
 	}
-	cursor := g.zenNodes.CursorFor(ids.Session)
-	if node := cursor.Next(); node != nil {
+	// Likewise, one bad key must not decide the verdict while sibling keys
+	// in the same tier are healthy.
+	seen := make(map[*upstreamNode]bool, g.zenNodes.Len())
+	zcursor := g.zenNodes.CursorFor(ids.Session)
+	for i := 0; i < g.zenNodes.Len(); i++ {
+		node := zcursor.Next()
+		if node == nil || seen[node] {
+			break
+		}
+		seen[node] = true
 		if proxy := g.zenNodes.Proxy(node); proxy != nil {
-			lanes = append(lanes, lane{node.key, "zen", proxy.client})
+			lanes = append(lanes, lane{node.key, "zen", proxy.client, config.RedactURL(proxy.name)})
 		}
 	}
 	result := probeResult{reason: "no_probe_channel"}
@@ -102,6 +125,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 		}
 		result = run("")
 		result.channel = lane.name
+		result.proxy = lane.proxy
 		if result.success {
 			if g.cfg.ForcedEffort(model) == "auto" && protocol != wire.SystemOne {
 				if !g.catalog.MetadataForTier(model, config.TierZen).Reasoning {

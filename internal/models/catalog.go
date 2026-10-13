@@ -58,6 +58,7 @@ type Catalog struct {
 	nativeProtocols map[config.Tier]map[string]wire.Protocol
 	unsupported     map[config.Tier]map[string]bool
 	modelMeta       map[config.Tier]map[string]Metadata
+	hidden          map[string]bool
 	updatedAt       time.Time
 	prefer          config.Tier
 	pricing         *PricingStore
@@ -96,6 +97,27 @@ func (c *Catalog) SetPricingStore(store *PricingStore) {
 	c.mu.Lock()
 	c.pricing = store
 	c.mu.Unlock()
+}
+
+// SetHidden replaces the operator hidden-model set. Hidden models are
+// excluded from discovery and routing but remain known for unhide.
+func (c *Catalog) SetHidden(models []string) {
+	c.mu.Lock()
+	hidden := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != "" {
+			hidden[model] = true
+		}
+	}
+	c.hidden = hidden
+	c.mu.Unlock()
+}
+
+// IsHidden reports whether the operator hid a model.
+func (c *Catalog) IsHidden(model string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.hidden[model]
 }
 
 func (c *Catalog) SetAvailabilityStore(store *AvailabilityStore) {
@@ -204,6 +226,9 @@ func (c *Catalog) Route(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) 
 }
 
 func (c *Catalog) routeLocked(model string, hasZenKeys, hasGoKeys, hasAnonymous bool) (Route, error) {
+	if c.hidden[model] {
+		return Route{}, fmt.Errorf("model %q is hidden by the operator (models.hidden)", model)
+	}
 	if c.availability != nil && c.availability.Disabled(model) {
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check; restore it in the WebUI or wait for the next probe", model)
 	}
@@ -301,6 +326,9 @@ func (c *Catalog) RouteForTier(model string, tier config.Tier, hasZenKeys, hasGo
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.hidden[model] {
+		return Route{}, fmt.Errorf("model %q is hidden by the operator (models.hidden)", model)
+	}
 	if c.availability != nil && c.availability.Disabled(model) {
 		return Route{}, fmt.Errorf("model %q is disabled after a failed availability check", model)
 	}
@@ -399,6 +427,14 @@ func (c *Catalog) List() []string {
 	return models
 }
 
+// ListIncludingHidden returns every known model ID regardless of the hidden
+// set, so the availability page can still offer an unhide action.
+func (c *Catalog) ListIncludingHidden() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.modelIDsLocked()
+}
+
 func (c *Catalog) modelIDsLocked() []string {
 	seen := make(map[string]bool, len(c.zen)+len(c.goModels))
 	for model := range c.zen {
@@ -495,6 +531,9 @@ func (c *Catalog) MetadataForTier(model string, tier config.Tier) Metadata {
 }
 
 func (c *Catalog) supportedLocked(model string) bool {
+	if c.hidden[model] {
+		return false
+	}
 	if len(c.zen) == 0 && len(c.goModels) == 0 {
 		return true
 	}
@@ -508,6 +547,9 @@ func (c *Catalog) supportedLocked(model string) bool {
 }
 
 func (c *Catalog) tierSupportedLocked(model string, tier config.Tier) bool {
+	if c.hidden[model] {
+		return false
+	}
 	if c.protocols[model] != "" {
 		return true
 	}

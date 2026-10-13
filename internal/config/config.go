@@ -25,6 +25,9 @@ type Config struct {
 	Anonymous         bool                         `json:"anonymous"`
 	Proxies           []string                     `json:"proxies"`
 	ProxyFile         string                       `json:"proxyfile"`
+	ProxyByModel      map[string][]string          `json:"proxy_by_model,omitempty"`
+	ProxyRetry        ProxyRetryConfig             `json:"proxy_retry,omitempty"`
+	ModelFallback     map[string]string            `json:"model_fallback,omitempty"`
 	Upstream          UpstreamConfig               `json:"upstream"`
 	Retry             RetryConfig                  `json:"retry"`
 	Models            ModelsConfig                 `json:"models"`
@@ -56,6 +59,14 @@ type UpstreamConfig struct {
 	Go  string `json:"go"`
 }
 
+// ProxyRetryConfig controls transport-error retries inside one model's
+// allowed proxy pool. MaxAttempts <= 0 means "use retry.max_attempts".
+// IntervalSeconds is the sleep between pool retries (0 = immediate).
+type ProxyRetryConfig struct {
+	MaxAttempts     int `json:"max_attempts,omitempty"`
+	IntervalSeconds int `json:"interval_seconds,omitempty"`
+}
+
 type RetryConfig struct {
 	MaxAttempts    int `json:"max_attempts"`
 	TimeoutSeconds int `json:"timeout_seconds"`
@@ -64,6 +75,7 @@ type RetryConfig struct {
 type ModelsConfig struct {
 	RefreshSeconds int               `json:"refresh_seconds"`
 	Protocols      map[string]string `json:"protocols"`
+	Hidden         []string          `json:"hidden,omitempty"`
 }
 
 type LoggingConfig struct {
@@ -246,6 +258,16 @@ func Normalize(path string, cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("models.protocols contains invalid mapping %q: %q", model, protocol)
 		}
 	}
+	if err := normalizeProxyByModel(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := normalizeProxyRetry(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := normalizeModelFallback(&cfg); err != nil {
+		return Config{}, err
+	}
+	normalizeHidden(&cfg)
 	if err := normalizeReasoning(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -339,6 +361,23 @@ func Clone(cfg Config) Config {
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)
 	cfg.effectiveProxies = append([]string(nil), cfg.effectiveProxies...)
+	if cfg.ProxyByModel != nil {
+		pools := make(map[string][]string, len(cfg.ProxyByModel))
+		for model, pool := range cfg.ProxyByModel {
+			pools[model] = append([]string(nil), pool...)
+		}
+		cfg.ProxyByModel = pools
+	}
+	if cfg.ModelFallback != nil {
+		fallback := make(map[string]string, len(cfg.ModelFallback))
+		for model, target := range cfg.ModelFallback {
+			fallback[model] = target
+		}
+		cfg.ModelFallback = fallback
+	}
+	if cfg.Models.Hidden != nil {
+		cfg.Models.Hidden = append([]string(nil), cfg.Models.Hidden...)
+	}
 	if cfg.Models.Protocols != nil {
 		protocols := make(map[string]string, len(cfg.Models.Protocols))
 		for key, value := range cfg.Models.Protocols {

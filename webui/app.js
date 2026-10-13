@@ -4,6 +4,7 @@ let csrf = "",
   config = null,
   monitorData = null,
   debugData = null,
+  availabilityData = null,
   lastPlayground = null,
   logEvents = [],
   eventSource = null,
@@ -143,12 +144,17 @@ function fillConfig(value) {
   $("#c-web-enabled").checked = value.webui.enabled;
   $("#c-anonymous").checked = !!value.anonymous;
   $("#c-proxyfile").value = value.proxyfile;
+  $("#c-proxy-by-model").value = JSON.stringify(value.proxy_by_model || {}, null, 2);
+  $("#c-proxy-retry-attempts").value = value.proxy_retry?.max_attempts ?? 0;
+  $("#c-proxy-retry-interval").value = value.proxy_retry?.interval_seconds ?? 0;
+  $("#c-model-fallback").value = JSON.stringify(value.model_fallback || {}, null, 2);
   $("#c-up-zen").value = value.upstream.zen;
   $("#c-up-go").value = value.upstream.go;
   $("#c-attempts").value = value.retry.max_attempts;
   $("#c-timeout").value = value.retry.timeout_seconds;
   $("#c-refresh").value = value.models.refresh_seconds;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
+  $("#c-hidden").value = JSON.stringify(value.models.hidden || [], null, 2);
   const reasoning = value.reasoning || {};
   $("#c-reasoning-effort").value = reasoning.effort || "";
   $("#c-reasoning-by-model").value = JSON.stringify(reasoning.effort_by_model || {}, null, 2);
@@ -164,6 +170,11 @@ function fillConfig(value) {
   $("#c-ring").value = value.logging.ring_size;
   $("#c-dump-bodies").checked = !!value.logging.dump_request_bodies;
   ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(renderChips);
+  refreshPbmOptions();
+  refreshModelDatalist();
+  renderPbmRows();
+  renderFallbackRows();
+  refreshAutoEfforts();
   const notice = $("#restart-notice");
   if (value.restart_required_fields?.length) {
     notice.textContent = `已保存但尚未生效：${value.restart_required_fields.join(", ")}。当前 API ${value.effective.listen}、WebUI ${value.effective.webui_listen}。请重启进程。`;
@@ -197,6 +208,337 @@ function secretInputs(name) {
     .map((value) => ({ value }));
   return kept.concat(added);
 }
+function pbmOptions() {
+  // Prefer resolved list (covers proxyfile); fall back to stored proxies.
+  if (config?.effective_proxies?.length) return config.effective_proxies;
+  return config?.proxies || [];
+}
+function pbmDisplay(value) {
+  const found = pbmOptions().find((item) => item.id === value);
+  if (found) return found.display;
+  return value;
+}
+let pbmModelFreeOnly = false;
+function pbmCandidateModels() {
+  const all = debugData?.models || [];
+  if (!pbmModelFreeOnly) return all;
+  return all.filter((item) => {
+    if (item.anonymous_eligibility && typeof item.anonymous_eligibility.allowed === "boolean")
+      return item.anonymous_eligibility.allowed;
+    return String(item.model || "").toLowerCase().includes("free");
+  });
+}
+function refreshModelDatalist() {
+  const list = $("#pbm-model-list");
+  if (!list) return;
+  list.replaceChildren();
+  const seen = new Set();
+  const add = (value) => {
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    const option = document.createElement("option");
+    option.value = value;
+    list.appendChild(option);
+  };
+  add("*");
+  pbmCandidateModels().forEach((item) => add(item.model));
+  try {
+    const parsed = readPbmJson();
+    if (parsed) Object.keys(parsed).forEach(add);
+  } catch (_) {}
+  try {
+    const parsed = JSON.parse($("#c-model-fallback")?.value || "{}");
+    if (parsed && typeof parsed === "object") {
+      Object.keys(parsed).forEach(add);
+      Object.values(parsed).forEach(add);
+    }
+  } catch (_) {}
+}
+function refreshPbmOptions() {
+  const select = $("#pbm-new-proxies");
+  if (!select) return;
+  const previously = new Set(
+    [...select.selectedOptions].map((option) => option.value),
+  );
+  select.replaceChildren();
+  for (const item of pbmOptions()) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.display;
+    option.title = item.display;
+    if (previously.has(item.id)) option.selected = true;
+    select.appendChild(option);
+  }
+}
+function readPbmJson() {
+  try {
+    const parsed = JSON.parse($("#c-proxy-by-model").value || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch (_) {}
+  return null;
+}
+function renderPbmRows() {
+  const host = $("#pbm-rows");
+  if (!host) return;
+  host.replaceChildren();
+  const parsed = readPbmJson();
+  if (!parsed) {
+    const hint = document.createElement("div");
+    hint.className = "section-caption";
+    hint.textContent = "JSON 解析失败，修正后才会列出已配模型。";
+    host.append(hint);
+    return;
+  }
+  const names = Object.keys(parsed);
+  if (!names.length) {
+    const hint = document.createElement("div");
+    hint.className = "section-caption";
+    hint.textContent = "尚未按模型指定代理，留空即全部走全局池。";
+    host.append(hint);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["模型", "出口（按优先级）", "操作"].forEach((title) => {
+    const cell = document.createElement("th");
+    cell.textContent = title;
+    headRow.append(cell);
+  });
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  for (const model of names) {
+    const row = document.createElement("tr");
+    const modelCell = document.createElement("td");
+    modelCell.textContent = model;
+    const poolCell = document.createElement("td");
+    poolCell.textContent = (parsed[model] || []).map(pbmDisplay).join(" · ");
+    const opCell = document.createElement("td");
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost";
+    del.textContent = "删除";
+    del.onclick = () => {
+      const next = readPbmJson() || {};
+      delete next[model];
+      $("#c-proxy-by-model").value = JSON.stringify(next, null, 2);
+      renderPbmRows();
+    };
+    opCell.append(del);
+    row.append(modelCell, poolCell, opCell);
+    body.append(row);
+  }
+  table.append(body);
+  host.append(table);
+}
+$("#pbm-model-scope")?.addEventListener("click", () => {
+  pbmModelFreeOnly = !pbmModelFreeOnly;
+  $("#pbm-model-scope").textContent = pbmModelFreeOnly ? "显示全部" : "只看 free";
+  refreshModelDatalist();
+});
+$("#pbm-add")?.addEventListener("click", () => {
+  const model = $("#pbm-new-model").value.trim();
+  const picked = [...$("#pbm-new-proxies").selectedOptions].map(
+    (option) => option.value,
+  );
+  if (!model) {
+    toast("先选模型 ID（或 *）", true);
+    return;
+  }
+  if (!picked.length) {
+    toast("在出口下拉里至少选一个（可 Ctrl/Shift 多选）", true);
+    return;
+  }
+  const next = readPbmJson();
+  if (!next) {
+    toast("下方 JSON 解析失败，先修正再加入", true);
+    return;
+  }
+  next[model] = picked;
+  $("#c-proxy-by-model").value = JSON.stringify(next, null, 2);
+  $("#pbm-new-model").value = "";
+  [...$("#pbm-new-proxies").options].forEach((option) => (option.selected = false));
+  refreshModelDatalist();
+  renderPbmRows();
+});
+$("#c-proxy-by-model")?.addEventListener("input", () => {
+  refreshModelDatalist();
+  renderPbmRows();
+});
+function readFallbackJson() {
+  try {
+    const parsed = JSON.parse($("#c-model-fallback").value || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch (_) {}
+  return null;
+}
+function renderFallbackRows() {
+  const host = $("#fb-rows");
+  if (!host) return;
+  host.replaceChildren();
+  const parsed = readFallbackJson();
+  if (!parsed) {
+    const hint = document.createElement("div");
+    hint.className = "section-caption";
+    hint.textContent = "JSON 解析失败，修正后才会列出路由关系。";
+    host.append(hint);
+    return;
+  }
+  const names = Object.keys(parsed);
+  if (!names.length) {
+    const hint = document.createElement("div");
+    hint.className = "section-caption";
+    hint.textContent = "未配置路由：主模型池耗尽即直接报错（A 模式）。";
+    host.append(hint);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["主模型 A（挂了）", "路由 B（只跳一次）", "操作"].forEach((title) => {
+    const cell = document.createElement("th");
+    cell.textContent = title;
+    headRow.append(cell);
+  });
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  for (const from of names) {
+    const row = document.createElement("tr");
+    const fromCell = document.createElement("td");
+    fromCell.textContent = from;
+    const toCell = document.createElement("td");
+    toCell.textContent = parsed[from];
+    const opCell = document.createElement("td");
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "ghost";
+    del.textContent = "删除";
+    del.onclick = () => {
+      const next = readFallbackJson() || {};
+      delete next[from];
+      $("#c-model-fallback").value = JSON.stringify(next, null, 2);
+      refreshModelDatalist();
+      renderFallbackRows();
+    };
+    opCell.append(del);
+    row.append(fromCell, toCell, opCell);
+    body.append(row);
+  }
+  table.append(body);
+  host.append(table);
+}
+$("#fb-add")?.addEventListener("click", () => {
+  const from = $("#fb-new-from").value.trim();
+  const to = $("#fb-new-to").value.trim();
+  if (!from || !to) {
+    toast("主模型和路由模型都要选", true);
+    return;
+  }
+  if (from === to) {
+    toast("路由模型不能和主模型相同", true);
+    return;
+  }
+  const next = readFallbackJson();
+  if (!next) {
+    toast("下方 JSON 解析失败，先修正再加入", true);
+    return;
+  }
+  if (next[to] === from) {
+    toast("检测到 A↔B 互指成环，后端会拒绝保存", true);
+    return;
+  }
+  next[from] = to;
+  $("#c-model-fallback").value = JSON.stringify(next, null, 2);
+  $("#fb-new-from").value = "";
+  $("#fb-new-to").value = "";
+  refreshModelDatalist();
+  renderFallbackRows();
+});
+$("#c-model-fallback")?.addEventListener("input", () => {
+  refreshModelDatalist();
+  renderFallbackRows();
+});
+async function refreshAutoEfforts() {
+  const host = $("#effort-auto-rows");
+  if (!host) return;
+  host.replaceChildren();
+  const hint = document.createElement("div");
+  hint.className = "section-caption";
+  hint.textContent = "读取探测结果…";
+  host.append(hint);
+  let items = [];
+  try {
+    const data = await api("/api/models/availability");
+    items = (data.models || []).filter((item) => item.auto_effort?.effort);
+  } catch (error) {
+    host.replaceChildren();
+    const warn = document.createElement("div");
+    warn.className = "section-caption";
+    warn.textContent = `读不到探测结果：${error.message}`;
+    host.append(warn);
+    return;
+  }
+  host.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "section-caption";
+    empty.textContent = "暂无已验证档位：把默认强度设为 auto 并等待免费模型探测（约 1 小时一轮，System One 不参与）。";
+    host.append(empty);
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["模型", "已验证档位", "验证时间", "操作"].forEach((title) => {
+    const cell = document.createElement("th");
+    cell.textContent = title;
+    headRow.append(cell);
+  });
+  head.append(headRow);
+  table.append(head);
+  const body = document.createElement("tbody");
+  for (const item of items) {
+    const row = document.createElement("tr");
+    const modelCell = document.createElement("td");
+    modelCell.textContent = item.model;
+    const effortCell = document.createElement("td");
+    effortCell.textContent = item.auto_effort.effort;
+    const timeCell = document.createElement("td");
+    const checked = item.effort_checked_at;
+    timeCell.textContent =
+      checked && !checked.startsWith("0001-") ? new Date(checked).toLocaleString() : "未知";
+    const opCell = document.createElement("td");
+    const write = document.createElement("button");
+    write.type = "button";
+    write.className = "ghost";
+    write.textContent = "写入覆盖";
+    write.title = "把该档位写入上方按模型覆盖并锁定，不再跟随探测";
+    write.onclick = () => {
+      let next = {};
+      try {
+        next = JSON.parse($("#c-reasoning-by-model").value || "{}");
+        if (!next || typeof next !== "object" || Array.isArray(next)) next = {};
+      } catch (_) {
+        toast("按模型覆盖 JSON 解析失败，先修正", true);
+        return;
+      }
+      next[item.model] = item.auto_effort.effort;
+      $("#c-reasoning-by-model").value = JSON.stringify(next, null, 2);
+      toast(`已写入 ${item.model} = ${item.auto_effort.effort}，记得点保存`);
+    };
+    opCell.append(write);
+    row.append(modelCell, effortCell, timeCell, opCell);
+    body.append(row);
+  }
+  table.append(body);
+  host.append(table);
+}
+$("#effort-refresh")?.addEventListener("click", refreshAutoEfforts);
 const number = (id) => Number($(id).value);
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -209,12 +551,19 @@ $("#config-form").addEventListener("submit", async (event) => {
       anonymous: $("#c-anonymous").checked,
       proxies: secretInputs("proxies"),
       proxyfile: $("#c-proxyfile").value,
+      proxy_by_model: JSON.parse($("#c-proxy-by-model").value || "{}"),
+      proxy_retry: {
+        max_attempts: number("#c-proxy-retry-attempts"),
+        interval_seconds: number("#c-proxy-retry-interval"),
+      },
+      model_fallback: JSON.parse($("#c-model-fallback").value || "{}"),
       prefer: $("#c-prefer").value,
       upstream: { zen: $("#c-up-zen").value, go: $("#c-up-go").value },
       retry: { max_attempts: number("#c-attempts"), timeout_seconds: number("#c-timeout") },
       models: {
         refresh_seconds: number("#c-refresh"),
         protocols: JSON.parse($("#c-protocols").value || "{}"),
+        hidden: JSON.parse($("#c-hidden").value || "[]"),
       },
       reasoning: {
         effort: $("#c-reasoning-effort").value,
@@ -553,6 +902,7 @@ async function loadDebugModels() {
     renderPlayKeys();
     if (!$("#play-request").value.trim()) resetPlayTemplate();
     renderDiagnostics();
+    refreshModelDatalist();
   } catch (error) {
     toast(error.message, true);
   }
@@ -715,6 +1065,8 @@ function renderDiagnostics() {
       appendCell(row, request.channel);
       appendCell(row, request.key_id || "—");
       appendCell(row, request.attempts);
+      appendCell(row, request.effort || "—");
+      appendCell(row, request.stream ? "流式" : "非流式");
       const terminalResults = {
         stream_error: "流式响应失败",
         client_canceled: "客户端已取消",
@@ -726,7 +1078,7 @@ function renderDiagnostics() {
       appendCell(row, `${request.duration_ms} ms`);
       requests.appendChild(row);
     });
-  if (!requests.children.length) emptyRow(requests, 9, "尚无请求路由");
+  if (!requests.children.length) emptyRow(requests, 11, "尚无请求路由");
   const attempts = $("#upstream-attempts");
   attempts.replaceChildren();
   (monitorData?.upstream?.recent || [])
@@ -740,11 +1092,12 @@ function renderDiagnostics() {
       appendCell(row, `${attempt.tier} / ${attempt.channel}`);
       appendCell(row, attempt.key_id);
       appendCell(row, attempt.proxy_node);
+      appendCell(row, attempt.effort || "—");
       appendCell(row, attempt.status || attempt.outcome, attempt.success ? "ok" : "bad");
       appendCell(row, `${attempt.duration_ms} ms`);
       attempts.appendChild(row);
     });
-  if (!attempts.children.length) emptyRow(attempts, 8, "尚无上游尝试");
+  if (!attempts.children.length) emptyRow(attempts, 9, "尚无上游尝试");
 }
 function renderDiagnosticModels() {
   const host = $("#diagnostic-models");
@@ -768,12 +1121,27 @@ function renderDiagnosticModels() {
       );
       appendCell(row, eligibility.allowed ? "允许" : "拒绝", eligibility.allowed ? "ok" : "warn");
       appendCell(row, eligibility.source || "—");
+      appendCell(row, diagnosticEffort(item.model));
       appendCell(row, `${input == null ? "?" : input} / ${output == null ? "?" : output}`, "cost");
       host.appendChild(row);
     });
-  if (!host.children.length) emptyRow(host, 6, "没有匹配模型");
+  if (!host.children.length) emptyRow(host, 7, "没有匹配模型");
 }
 $("#diagnostic-model-search").addEventListener("input", renderDiagnosticModels);
+// diagnosticEffort merges the operator-pinned override with the auto-probed
+// level: a pinned concrete value always wins and stops following probes;
+// "auto" (default or pinned) resolves to the probed level when known.
+function diagnosticEffort(model) {
+  const reasoning = config?.reasoning || {};
+  const pinned = reasoning.effort_by_model?.[model];
+  if (pinned && pinned !== "auto") return `锁定 ${pinned}`;
+  const found = (availabilityData?.models || []).find((item) => item.model === model);
+  const auto = found?.auto_effort?.effort;
+  if (pinned === "auto" || reasoning.effort === "auto") return auto ? `auto→${auto}` : "auto（待探测）";
+  if (reasoning.effort) return `默认 ${reasoning.effort}`;
+  if (auto) return `auto→${auto}`;
+  return "—";
+}
 async function refreshMonitor() {
   try {
     monitorData = await api("/api/monitor");
@@ -1391,22 +1759,34 @@ boot();
 async function loadAvailability() {
   try {
     const data = await api("/api/models/availability");
+    availabilityData = data;
     $("#availability-error").textContent = "";
     $("#availability-models").replaceChildren();
-    for (const item of data.models) {
+    $("#availability-hidden-models").replaceChildren();
+    const visible = (data.models || []).filter((item) => !item.hidden);
+    const hidden = (data.models || []).filter((item) => item.hidden);
+    const summary = $("#availability-hidden-summary");
+    if (summary) summary.textContent = `已隐藏模型（${hidden.length}，点击展开）`;
+    const wrap = $("#availability-hidden-wrap");
+    if (wrap) wrap.style.display = hidden.length ? "" : "none";
+    const date = (value) =>
+      value && !value.startsWith("0001-") ? new Date(value).toLocaleString() : "待探测";
+    const buildRow = (item) => {
       const row = document.createElement("tr");
-      const date = (value) =>
-        value && !value.startsWith("0001-") ? new Date(value).toLocaleString() : "待探测";
       for (const value of [
-        item.model,
-        item.disabled ? "已禁用" : "已启用",
+        item.model + (item.hidden ? "（已隐藏）" : ""),
+        item.hidden ? "已隐藏" : item.disabled ? "已禁用" : "已启用",
         [item.channel, item.reason].filter(Boolean).join(" / ") || "待探测",
         item.manual ? "手动" : "自动",
         item.auto_effort?.effort
           ? `${item.auto_effort.effort}（${date(item.effort_checked_at)}）`
           : "未验证",
         date(item.checked_at),
-        item.manual ? "手动控制，不自动探测" : date(item.next_check),
+        item.hidden
+          ? "已隐藏，不探测"
+          : item.manual
+            ? "手动控制，不自动探测"
+            : date(item.next_check),
       ]) {
         const cell = document.createElement("td");
         cell.textContent = value;
@@ -1416,9 +1796,24 @@ async function loadAvailability() {
       const button = document.createElement("button");
       button.textContent = "恢复启用";
       button.disabled = !item.disabled;
+      const toggle = document.createElement("button");
+      toggle.className = "ghost";
+      toggle.textContent = item.manual ? "切回自动" : "切为手动";
+      const hide = document.createElement("button");
+      hide.className = "ghost";
+      hide.textContent = item.hidden ? "取消隐藏" : "隐藏";
+      const probe = document.createElement("button");
+      probe.className = "ghost";
+      probe.textContent = "立即探测";
+      probe.title = "不等定时调度，现在就探一次（最长约80秒）";
+      const setBusy = (busy) => {
+        button.disabled = busy || !item.disabled;
+        toggle.disabled = busy;
+        hide.disabled = busy;
+        probe.disabled = busy;
+      };
       button.onclick = async () => {
-        button.disabled = true;
-        toggle.disabled = true;
+        setBusy(true);
         try {
           await api("/api/models/restore", {
             method: "POST",
@@ -1428,17 +1823,12 @@ async function loadAvailability() {
           await loadDebugModels();
         } catch (error) {
           $("#availability-error").textContent = error.message;
-          button.disabled = !item.disabled;
-          toggle.disabled = false;
+          setBusy(false);
         }
       };
       cell.append(button);
-      const toggle = document.createElement("button");
-      toggle.className = "ghost";
-      toggle.textContent = item.manual ? "切回自动" : "切为手动";
       toggle.onclick = async () => {
-        button.disabled = true;
-        toggle.disabled = true;
+        setBusy(true);
         try {
           await api("/api/models/manual", {
             method: "POST",
@@ -1448,14 +1838,62 @@ async function loadAvailability() {
           await loadDebugModels();
         } catch (error) {
           $("#availability-error").textContent = error.message;
-          button.disabled = !item.disabled;
-          toggle.disabled = false;
+          setBusy(false);
         }
       };
       cell.append(toggle);
+      hide.onclick = async () => {
+        setBusy(true);
+        try {
+          await api("/api/models/hide", {
+            method: "POST",
+            body: JSON.stringify({ model: item.model, hidden: !item.hidden }),
+          });
+          await loadAvailability();
+          await loadDebugModels();
+          await loadConfig();
+        } catch (error) {
+          $("#availability-error").textContent = error.message;
+          setBusy(false);
+        }
+      };
+      cell.append(hide);
+      probe.onclick = async () => {
+        setBusy(true);
+        probe.textContent = "探测中…";
+        try {
+          const result = await api("/api/models/probe", {
+            method: "POST",
+            body: JSON.stringify({ model: item.model }),
+          });
+          const p = result.probe || {};
+          if (!p.attempted) {
+            $("#availability-error").textContent =
+              `未探（${p.reason || "无可用通道"}）：检查匿名/Key 是否配置；手动模型只显示结果不记入`;
+          } else {
+            $("#availability-error").textContent = "";
+            const outcome = p.success ? "成功" : "失败";
+            const detail = [p.channel, p.proxy, p.reason].filter(Boolean).join(" / ");
+            const tail = p.recorded ? "，已记入" : "，未记入（手动/隐藏只显示）";
+            toast(`${item.model}：${outcome}（${detail}）${tail}`);
+          }
+          await loadAvailability();
+          await loadDebugModels();
+          if (typeof refreshAutoEfforts === "function") refreshAutoEfforts();
+        } catch (error) {
+          $("#availability-error").textContent = error.message;
+          setBusy(false);
+        } finally {
+          probe.textContent = "立即探测";
+        }
+      };
+      cell.append(probe);
       row.append(cell);
-      $("#availability-models").append(row);
-    }
+      return row;
+    };
+    for (const item of visible) $("#availability-models").append(buildRow(item));
+    for (const item of hidden) $("#availability-hidden-models").append(buildRow(item));
+    if (typeof renderDiagnostics === "function") renderDiagnostics();
     if (!data.models.length)
       $("#availability-error").textContent = "当前模型目录中没有符合免费资格的模型。";
   } catch (error) {
