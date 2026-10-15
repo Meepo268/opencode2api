@@ -130,9 +130,9 @@ func (g *Gateway) doUpstreamOffset(ctx context.Context, route models.Route, bodi
 }
 
 // isStaleReasoningReference reports whether an upstream 400 body describes a
-// stale reference this caller can no longer use upstream. Two distinct classes
-// match, and both are recoverable by dropping the stale pieces (reasoning items
-// and any previous_response_id chain link) and replaying once:
+// stale reference this caller can no longer use upstream. Three distinct
+// classes match, and all are recoverable by dropping the stale pieces
+// (reasoning items and any previous_response_id chain link) and replaying once:
 //
 //  1. Gone or expired reasoning: "Referenced reasoning item 'rs_...' was not
 //     found or has expired", "reasoning reference does not exist".
@@ -142,6 +142,12 @@ func (g *Gateway) doUpstreamOffset(ctx context.Context, route models.Route, bodi
 //     stripStaleReasoningInputs also drops previous_response_id -- typically
 //     copied into a fresh window by a compression tool, or filled in by hand
 //     with a stale response id.
+//  3. Issued to another caller: "reasoning `encrypted_content` was not issued
+//     to this caller". The encrypted reasoning blob is sealed to the account
+//     or anonymous exit that minted it, so it is rejected the moment the
+//     conversation is replayed to a different upstream caller -- which is what
+//     a provider/model switch, or a lane flip between the free tier and a key,
+//     does to an already-running window.
 //
 // Generic validation errors that merely mention reasoning (e.g. "unknown
 // reasoning field", "reasoning effort is not supported") must NOT match.
@@ -158,15 +164,44 @@ func isStaleReasoningReference(body []byte) bool {
 		}
 		return false
 	}
-	if !strings.Contains(text, "reasoning item") && !strings.Contains(text, "reasoning reference") {
-		return false
+	// Class 1 needs the explicit item/reference noun so an unrelated
+	// "reasoning" mention cannot match on the marker alone.
+	if strings.Contains(text, "reasoning item") || strings.Contains(text, "reasoning reference") {
+		for _, marker := range []string{"not found", "expir", "does not exist", "no longer"} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
 	}
-	for _, marker := range []string{"not found", "expir", "does not exist", "no longer"} {
-		if strings.Contains(text, marker) {
-			return true
+	// Class 3 is scoped to caller identity, so the message itself carries the
+	// proof: a reasoning blob exists but this caller never received it.
+	if strings.Contains(text, "reasoning") {
+		for _, marker := range []string{"not issued", "issued to another", "issued to a different", "does not belong to", "not recognized by this caller"} {
+			if strings.Contains(text, marker) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// staleReasoning400 reports whether resp is a 400 whose body describes an
+// unusable reasoning reference. The body is buffered and restored, so the
+// caller can still read it: doUpstreamTiers uses this to abandon the remaining
+// lanes early (a payload-bound reference cannot be fixed by another caller),
+// and doUpstream still reads the body afterwards for logging and replay.
+func staleReasoning400(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusBadRequest || resp.Body == nil {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	httpx.DrainAndClose(resp.Body)
+	if err != nil && len(raw) == 0 {
+		return false
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
+	resp.ContentLength = int64(len(raw))
+	return isStaleReasoningReference(raw)
 }
 
 // stripStaleReasoningInputs removes server-issued reasoning references from
@@ -262,6 +297,7 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	}
 
 	var anonResp *http.Response
+	staleReasoning := false
 	runAnonymous := func() bool {
 		resp, err, used := g.doAnonymousUpstream(ctx, route, bodies, ids, attempts)
 		attempts += used
@@ -270,6 +306,9 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 			markSwitched("anonymous")
 			anonResp = resp
 			return true
+		}
+		if staleReasoning400(resp) {
+			staleReasoning = true
 		}
 		lastResponse, lastErr = resp, err
 		effectiveRoute = route
@@ -282,6 +321,11 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		}
 		if len(route.KeyTiers) > 0 {
 			g.logger.Debug("anonymous request did not succeed; entering preferred key tiers", "component", "upstream", "event", "anonymous_fallback", "request_id", ids.Request, "attempts", attempts, "key_tiers", route.KeyTiers)
+		}
+		if staleReasoning {
+			// Same caller-bound reasoning rejection as the key phase: another lane
+			// would only repeat it.
+			return lastResponse, effectiveRoute, attempts, nil
 		}
 	}
 	if ctx.Err() != nil {
@@ -328,6 +372,13 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 			lastErr = err
 		}
 		keyPhaseFailed = true
+		// A reasoning reference the upstream refuses is sealed to the caller that
+		// minted it, so another key tier cannot satisfy it either. Hand the 400
+		// back now and let doUpstream strip the stale items and replay once,
+		// instead of paying a second upstream round-trip for the same rejection.
+		if staleReasoning400(resp) {
+			return lastResponse, effectiveRoute, attempts, nil
+		}
 	}
 
 	// A session pinned away from the anonymous lane still gets that lane as a

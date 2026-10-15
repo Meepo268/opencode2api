@@ -25,6 +25,7 @@
 - **取消勾选＝会话粘性**：某会话一旦在某个通道成功，后续轮次直接从该通道开始，不再每轮重试免费通道。钉选的通道失败时仍会回落到另一个通道，2 小时未活跃自动回到默认顺序。
 - 观察方式：日志 `request_routed` 新增 `pinned_lane`（`anonymous` / `key` / 空）与 `lane_switched`（本轮是否偏离钉选）。若长会话里 `pinned_lane` 一直有值且 `lane_switched=false`，说明粘性生效；若频繁 `lane_switched=true`，说明钉选通道不稳。
 - 注意：确定性 `400/404/422` 不再在匿名池内逐个出口重试（换出口改不了同样的字节），这与 Key 通道原有行为一致；`401/403/429` 仍会换出口。
+- **400 的自动修复**：上游若说本次请求里的 `reasoning` 引用它用不了，网关会剥掉本次请求中的 reasoning 条目、用同一个模型重放一次，日志记 `reasoning_reference_retry`。命中两类：`reasoning item ... not found / has expired`（引用过期或丢失），以及 `reasoning encrypted_content was not issued to this caller`（思考内容加密在**别的账号或出口**名下——换供应商、换模型，或从免费通道切到 Key 通道后，老窗口里存着的思考条目就会触发这一条）。这类错误换出口、换 Key 都不会变好，所以网关在第一个通道报出后就直接修复，不再逐个通道空跑一遍。只提到 reasoning 却与引用无关的 `400`（例如 `reasoning effort is not supported`）不会剥离也不重放。副作用：修复重放的那一次回答看不到自己之前的思考内容，对话历史本身不受影响。
 
 ## 隐藏模型
 
