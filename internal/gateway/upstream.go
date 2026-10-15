@@ -1022,6 +1022,17 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		meta.ToolAlias = alias
 	}
 	proxy := nodes.Proxy(node)
+	if g.cfg.HasCustomProxyPool(route.ID) {
+		// A model with an explicit proxy pool must leave through that pool
+		// even in diagnostics: production traffic for this model uses
+		// doKeyUpstreamAllowed, so testing the key through its sticky
+		// binding would answer a question nobody asked (and can geo-fence
+		// the attempt, e.g. via direct) while the real path stays healthy.
+		if allowed := allowedProxiesInOrder(g.transports, g.cfg.ProxyAllowlistFor(route.ID)); len(allowed) > 0 {
+			proxy = pickAllowedProxy(allowed, proxyAffinityOffset(ids.Session+"\x00"+route.ID, len(allowed)), 0)
+			g.logger.Debug("selected key uses model proxy pool", "component", "upstream", "event", "selected_key_proxy_pool", "request_id", ids.Request, "model", route.ID, "key_id", config.KeyDisplayID(node.key), "proxy", config.RedactURL(proxy.name))
+		}
+	}
 	if proxy == nil {
 		return nil, errors.New("selected upstream key has no proxy binding"), 0
 	}
