@@ -232,6 +232,12 @@ func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (App
 	}
 	if current != nil {
 		next.gateway.catalog.CopyState(current.gateway.catalog)
+		// A config save rebuilds the transport pool from scratch. Carry
+		// proxy health across so a dead exit is not resurrected by tuning
+		// unrelated settings.
+		if carried := carryProxyHealth(current.gateway.transports, next.gateway.transports); carried > 0 {
+			m.logger.Info("proxy health carried over config reload", "component", "proxy", "event", "proxy_health_carried", "proxies", carried)
+		}
 	}
 	if err := normalized.Rotation.Validate(next.gateway.catalog.List()); err != nil {
 		return ApplyResult{}, err

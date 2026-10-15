@@ -197,6 +197,40 @@ func normalizeProxyRetry(cfg *Config) error {
 	return nil
 }
 
+// normalizeProxyHealth backfills probe policy defaults for fields the operator
+// left unset and clamps the rest. An absent proxy_health block behaves exactly
+// like the defaults, so existing deployments gain probing without editing.
+func normalizeProxyHealth(cfg *Config) {
+	defaults := DefaultProxyHealth()
+	health := cfg.ProxyHealth
+	if health.ProbeIntervalMinutes <= 0 {
+		health.ProbeIntervalMinutes = defaults.ProbeIntervalMinutes
+	}
+	if health.ProbeIntervalMinutes > 1440 {
+		health.ProbeIntervalMinutes = 1440
+	}
+	if health.ProbeTimeoutSeconds <= 0 {
+		health.ProbeTimeoutSeconds = defaults.ProbeTimeoutSeconds
+	}
+	if health.ProbeTimeoutSeconds > 120 {
+		health.ProbeTimeoutSeconds = 120
+	}
+	health.ProbeURL = strings.TrimSpace(health.ProbeURL)
+	if health.ProbeURL == "" {
+		health.ProbeURL = defaults.ProbeURL
+	}
+	if health.MaxProbeBackoffMinutes <= 0 {
+		health.MaxProbeBackoffMinutes = defaults.MaxProbeBackoffMinutes
+	}
+	if health.MaxProbeBackoffMinutes > 1440 {
+		health.MaxProbeBackoffMinutes = 1440
+	}
+	if health.MaxProbeBackoffMinutes < health.ProbeIntervalMinutes {
+		health.MaxProbeBackoffMinutes = health.ProbeIntervalMinutes
+	}
+	cfg.ProxyHealth = health
+}
+
 func normalizeModelFallback(cfg *Config) error {
 	if len(cfg.ModelFallback) == 0 {
 		cfg.ModelFallback = nil

@@ -11,6 +11,12 @@
     "max_attempts": 0,
     "interval_seconds": 0
   },
+  "proxy_health": {
+    "probe_interval_minutes": 5,
+    "probe_timeout_seconds": 5,
+    "probe_url": "https://cp.cloudflare.com/generate_204",
+    "max_probe_backoff_minutes": 60
+  },
   "model_fallback": {},
   "upstream": {
     "zen": "https://opencode.ai/zen",
@@ -19,7 +25,8 @@
   },
   "retry": {
     "max_attempts": 3,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "sleep_on_rotation": false
   },
   "models": {
     "refresh_seconds": 300,

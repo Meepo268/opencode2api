@@ -215,7 +215,7 @@ The routing sequence is:
 2. Try authenticated tiers in `prefer` order, using only tiers with a configured key and a route for that model.
 3. Apply `retry.max_attempts` separately to each authenticated tier.
 
-Anonymous attempts are not cut short by `retry.max_attempts`, but all attempts share the request timeout. Network errors, authentication failures, rate limits, and server errors can rotate keys. Other 4xx responses end the current tier; another available tier may still be tried.
+Anonymous attempts are not cut short by `retry.max_attempts`, but all attempts share the request timeout. Network errors retry the same exit once after `proxy_retry.interval_seconds` (sticky-first, preserving session affinity) before rotating; rotation itself never sleeps unless `retry.sleep_on_rotation` is set. A 401/403 key is dropped for the rest of the request. Other 4xx responses end the current tier; another available tier may still be tried.
 
 Requests are encoded for each tier's own protocol. With `performance.first_event_timeout_seconds` enabled, a successful SSE response is held until the first complete data event. A timeout or disconnect before that event uses the existing key/proxy retry budget; comments do not satisfy the timeout. Once released downstream, the stream is never replayed. The default is `0` (disabled); try `15` seconds for upstreams that accept requests but send no events. This bounds the first event, not the first text token, and does not apply to System One. Rotation aliases use their separate `rotation.first_output_seconds` timeout. A recognized stale Responses reference can trigger one repair pass, which drops the offending reasoning items and any `previous_response_id` chain link and replays the same model. Two classes qualify: an upstream 400 naming a reasoning item or reference that is gone or expired (`reasoning item not found`, `... has expired`), and a `previous_response_id` whose response upstream no longer knows (`referenced response not found or expired`) - typically a response id copied into a fresh window by a compression tool, or a malformed one that does not start with `resp_`. Deterministic 400s that merely mention reasoning (`reasoning effort is not supported`) are never stripped. Selected-key diagnostics never use that replay.
 
@@ -299,7 +299,11 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `proxyfile`                 | Optional; relative paths resolve beside the configuration file.             |
 | `proxy_by_model`            | `{}`; per-model allowed proxy pools (subset of global proxies).            |
 | `proxy_retry.max_attempts`  | `0` (use `retry.max_attempts`); range 0–10.                                 |
-| `proxy_retry.interval_seconds` | `0` (immediate); range 0–60.                                             |
+| `proxy_retry.interval_seconds` | `0` (immediate); range 0–60. Sleeps only before a sticky retry of the same node. |
+| `proxy_health.probe_interval_minutes` | `5`; bad-proxy recheck cadence, range 1–1440.                     |
+| `proxy_health.probe_timeout_seconds` | `5`; per-probe timeout, range 1–120.                                |
+| `proxy_health.probe_url` | `https://cp.cloudflare.com/generate_204`; fetched through the proxy under test. |
+| `proxy_health.max_probe_backoff_minutes` | `60`; backoff ceiling for failing proxies, range 1–1440.      |
 | `model_fallback`            | `{}`; single-hop `A→C` fallback on retryable pool exhaustion.              |
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
@@ -387,6 +391,7 @@ Use it when the endpoint behind the URL already performs the rotation and the po
 | --------------------------------------- | ------- | ------------------------------------------------------ |
 | `retry.max_attempts`                    | `3`     | Attempts per authenticated tier, including the first.  |
 | `retry.timeout_seconds`                 | `300`   | Total inference timeout, including stream consumption. |
+| `retry.sleep_on_rotation`               | `false` | Sleep the retry interval before every rotation when true; default only sleeps before a sticky same-node retry. |
 | `performance.attempt_timeout_seconds`   | `0`     | Whole-attempt bound; 0 uses the request timeout.       |
 | `performance.first_event_timeout_seconds` | `0` | First SSE event wait; 0 disables. Try `15` for fewer hung streams. |
 | `performance.connect_timeout_seconds`   | `5`     | Connection establishment timeout.                      |
