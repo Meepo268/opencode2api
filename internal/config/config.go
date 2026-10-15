@@ -103,6 +103,12 @@ type ProxyHealthConfig struct {
 	// proxy that keeps failing. Probing never stops entirely: without a live
 	// recheck a long outage would permanently condemn the proxy.
 	MaxProbeBackoffMinutes int `json:"max_probe_backoff_minutes,omitempty"`
+	// Disabled turns off both the scheduled re-probes and the neutral
+	// verify-after-error check. Failure bookkeeping (marking bad proxies,
+	// key/proxy cooldowns, per-request recovery probes) is unaffected.
+	// Zero value false keeps probing enabled, so existing configurations
+	// gain nothing to change.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // DefaultProxyHealth returns the probe policy used when the operator did not

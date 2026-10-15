@@ -12,10 +12,8 @@
     "interval_seconds": 0
   },
   "proxy_health": {
-    "probe_interval_minutes": 5,
-    "probe_timeout_seconds": 5,
-    "probe_url": "https://cp.cloudflare.com/generate_204",
-    "max_probe_backoff_minutes": 60
+    "disabled": false,
+    "probe_interval_minutes": 5
   },
   "model_fallback": {},
   "upstream": {

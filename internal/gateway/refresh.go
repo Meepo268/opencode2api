@@ -50,6 +50,9 @@ func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, st
 }
 
 func (g *Gateway) verifyProxyAfterError(ctx context.Context, proxy *proxyTransport, status int) {
+	if g.cfg.ProxyHealth.Disabled {
+		return
+	}
 	if !proxy.checking.CompareAndSwap(false, true) {
 		return
 	}
@@ -96,6 +99,10 @@ func (g *Gateway) restoreProxy(proxy *proxyTransport) (zenMoved, goMoved int) {
 }
 
 func (g *Gateway) StartProxyHealthChecks(ctx context.Context) {
+	if g.cfg.ProxyHealth.Disabled {
+		g.logger.Info("proxy health probing disabled by operator", "component", "proxy", "event", "proxy_health_disabled")
+		return
+	}
 	check := func() {
 		results := g.transports.CheckHealth(ctx, g.cfg.ProxyHealth)
 		for _, result := range results {

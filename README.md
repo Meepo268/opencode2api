@@ -300,10 +300,8 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `proxy_by_model`            | `{}`; per-model allowed proxy pools (subset of global proxies).            |
 | `proxy_retry.max_attempts`  | `0` (use `retry.max_attempts`); range 0–10.                                 |
 | `proxy_retry.interval_seconds` | `0` (immediate); range 0–60. Sleeps only before a sticky retry of the same node. |
-| `proxy_health.probe_interval_minutes` | `5`; bad-proxy recheck cadence, range 1–1440.                     |
-| `proxy_health.probe_timeout_seconds` | `5`; per-probe timeout, range 1–120.                                |
-| `proxy_health.probe_url` | `https://cp.cloudflare.com/generate_204`; fetched through the proxy under test. |
-| `proxy_health.max_probe_backoff_minutes` | `60`; backoff ceiling for failing proxies, range 1–1440.      |
+| `proxy_health.disabled` | `false`; when true, no scheduled or verify-after-error probes (bookkeeping unaffected). |
+| `proxy_health.probe_interval_minutes` | `5`; bad-proxy recheck cadence, range 1–1440 (other probe tunables take defaults). |
 | `model_fallback`            | `{}`; single-hop `A→C` fallback on retryable pool exhaustion.              |
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
