@@ -109,6 +109,8 @@ Messages，以及这三种协议的流式输出。真实模型 ID 的原有调�
 
 管理接口均需要现有管理 Session，写入另需 CSRF：
 
+- `PUT /api/config`：合并语义——省略字段沿用当前值，对象按字段合并（可局部更新），`null` 等同省略；`proxy_by_model` / `model_fallback` 仅显式 `{}` 清空；密钥数组省略即保留、显式 `[]` 即清空。`reveal` 需二次密码校验并与登录共享限流。
+
 - `GET /api/rotation`：分组配置、可用状态、暂停期限、切换和尝试记录。
 - `PUT /api/rotation`：提交 `sota` / `sweet` 的 `alias`、完整 `order`，以及
   `first_output_seconds`；别名不得重复或与真实模型 ID 冲突，成员不得跨组。

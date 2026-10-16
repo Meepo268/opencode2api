@@ -639,6 +639,11 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 		if fallback := g.cfg.FallbackFor(model); fallback != "" {
 			if fallbackResp, fallbackUpstream, fallbackErr := g.trySystemOneFallback(upstreamCtx, body, ids, model, fallback); fallbackErr == nil && fallbackResp != nil && fallbackResp.StatusCode/100 == 2 {
 				g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+				// Budget expiry can leave resp non-nil alongside err; drain the
+				// losing body before resp is overwritten by the fallback.
+				if resp != nil {
+					httpx.DrainAndClose(resp.Body)
+				}
 				resp, upstreamRoute, err = fallbackResp, fallbackUpstream, nil
 				model = fallback
 				if meta != nil {
