@@ -30,14 +30,18 @@ type Config struct {
 	ProxyRetry        ProxyRetryConfig             `json:"proxy_retry,omitempty"`
 	ProxyHealth       ProxyHealthConfig            `json:"proxy_health,omitempty"`
 	ModelFallback     map[string]string            `json:"model_fallback,omitempty"`
-	Upstream          UpstreamConfig               `json:"upstream"`
-	Retry             RetryConfig                  `json:"retry"`
-	Models            ModelsConfig                 `json:"models"`
-	Performance       PerformanceConfig            `json:"performance"`
-	Logging           LoggingConfig                `json:"logging"`
-	WebUI             WebUIConfig                  `json:"webui"`
-	Prefer            Tier                         `json:"prefer"`
-	Reasoning         ReasoningConfig              `json:"reasoning"`
+	// ContentRefusal steers sessions away from a model that refuses on
+	// content-policy grounds. Rounds counts successful fallback rounds
+	// before the primary is probed again; 0 disables the detour.
+	ContentRefusal ContentRefusalConfig `json:"content_refusal,omitempty"`
+	Upstream       UpstreamConfig       `json:"upstream"`
+	Retry          RetryConfig          `json:"retry"`
+	Models         ModelsConfig         `json:"models"`
+	Performance    PerformanceConfig    `json:"performance"`
+	Logging        LoggingConfig        `json:"logging"`
+	WebUI          WebUIConfig          `json:"webui"`
+	Prefer         Tier                 `json:"prefer"`
+	Reasoning      ReasoningConfig      `json:"reasoning"`
 
 	effectiveProxies []string
 }
@@ -122,6 +126,18 @@ func DefaultProxyHealth() ProxyHealthConfig {
 	}
 }
 
+// defaultContentRefusalRounds is the out-of-box stickiness: after a
+// content refusal the session serves this many rounds on the fallback
+// model before probing the primary again. An explicit 0 disables it.
+const defaultContentRefusalRounds = 3
+
+// ContentRefusalConfig controls the session detour taken when the primary
+// model refuses on content-policy grounds (content_filter). It only fires
+// when model_fallback names a target for the refusing model.
+type ContentRefusalConfig struct {
+	Rounds int `json:"rounds,omitempty"`
+}
+
 type ModelsConfig struct {
 	RefreshSeconds int               `json:"refresh_seconds"`
 	Protocols      map[string]string `json:"protocols"`
@@ -198,15 +214,16 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg := Config{
-		Listen:      "127.0.0.1:8080",
-		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
-		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
-		ProxyHealth: DefaultProxyHealth(),
-		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
-		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
-		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
-		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
-		Prefer:      TierGo,
+		Listen:         "127.0.0.1:8080",
+		Upstream:       UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
+		Retry:          RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
+		ContentRefusal: ContentRefusalConfig{Rounds: defaultContentRefusalRounds},
+		ProxyHealth:    DefaultProxyHealth(),
+		Models:         ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
+		Performance:    PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
+		Logging:        LoggingConfig{Level: "info", RingSize: 2000},
+		WebUI:          WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
+		Prefer:         TierGo,
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -345,6 +362,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 		return Config{}, err
 	}
 	normalizeProxyHealth(&cfg)
+	normalizeContentRefusal(&cfg)
 	if err := normalizeModelFallback(&cfg); err != nil {
 		return Config{}, err
 	}

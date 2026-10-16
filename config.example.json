@@ -16,6 +16,7 @@
     "probe_interval_minutes": 5
   },
   "model_fallback": {},
+  "content_refusal": { "rounds": 3 },
   "upstream": {
     "zen": "https://opencode.ai/zen",
     "go": "https://opencode.ai/zen/go",
