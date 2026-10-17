@@ -124,20 +124,21 @@ type ConfigView struct {
 	// ProxyByModel is masked the same way as Proxies: pool entries carry
 	// credentials, so the view exposes fingerprints plus a redacted display
 	// string and never the raw URL.
-	ProxyByModel  map[string][]SecretView  `json:"proxy_by_model,omitempty"`
-	ProxyRetry    config.ProxyRetryConfig  `json:"proxy_retry,omitempty"`
-	ProxyHealth   config.ProxyHealthConfig `json:"proxy_health,omitempty"`
-	ModelFallback map[string]string        `json:"model_fallback,omitempty"`
-	Upstream      config.UpstreamConfig    `json:"upstream"`
-	Retry         config.RetryConfig       `json:"retry"`
-	Models        config.ModelsConfig      `json:"models"`
-	Performance   config.PerformanceConfig `json:"performance"`
-	Logging       config.LoggingConfig     `json:"logging"`
-	Prefer        config.Tier              `json:"prefer"`
-	Reasoning     config.ReasoningConfig   `json:"reasoning"`
-	WebUI         WebUIView                `json:"webui"`
-	Effective     EffectiveView            `json:"effective"`
-	Restart       []string                 `json:"restart_required_fields,omitempty"`
+	ProxyByModel   map[string][]SecretView     `json:"proxy_by_model,omitempty"`
+	ProxyRetry     config.ProxyRetryConfig     `json:"proxy_retry,omitempty"`
+	ProxyHealth    config.ProxyHealthConfig    `json:"proxy_health,omitempty"`
+	ModelFallback  map[string]string           `json:"model_fallback,omitempty"`
+	ContentRefusal config.ContentRefusalConfig `json:"content_refusal"`
+	Upstream       config.UpstreamConfig       `json:"upstream"`
+	Retry          config.RetryConfig          `json:"retry"`
+	Models         config.ModelsConfig         `json:"models"`
+	Performance    config.PerformanceConfig    `json:"performance"`
+	Logging        config.LoggingConfig        `json:"logging"`
+	Prefer         config.Tier                 `json:"prefer"`
+	Reasoning      config.ReasoningConfig      `json:"reasoning"`
+	WebUI          WebUIView                   `json:"webui"`
+	Effective      EffectiveView               `json:"effective"`
+	Restart        []string                    `json:"restart_required_fields,omitempty"`
 }
 
 type EffectiveView struct {
@@ -166,19 +167,20 @@ type ConfigUpdate struct {
 	Anonymous  bool          `json:"anonymous"`
 	Proxies    []SecretInput `json:"proxies"`
 	ProxyFile  string        `json:"proxyfile"`
-	// Pointers distinguish an omitted field (keep the current pools, fallback or
-	// probe policy, which is what a WebUI save that does not render them yet
-	// implies) from an explicit empty object (clear it).
-	ProxyByModel  *map[string][]string      `json:"proxy_by_model,omitempty"`
-	ProxyRetry    *config.ProxyRetryConfig  `json:"proxy_retry,omitempty"`
-	ProxyHealth   *config.ProxyHealthConfig `json:"proxy_health,omitempty"`
-	ModelFallback *map[string]string        `json:"model_fallback,omitempty"`
-	Upstream      config.UpstreamConfig     `json:"upstream"`
-	Retry         config.RetryConfig        `json:"retry"`
-	Models        config.ModelsConfig       `json:"models"`
-	Performance   config.PerformanceConfig  `json:"performance"`
-	Logging       config.LoggingConfig      `json:"logging"`
-	Prefer        config.Tier               `json:"prefer"`
+	// Pointers distinguish an omitted field (keep the current pools, fallback,
+	// probe policy or refusal policy, which is what a WebUI save that does not
+	// render them yet implies) from an explicit empty object (clear it).
+	ProxyByModel   *map[string][]string         `json:"proxy_by_model,omitempty"`
+	ProxyRetry     *config.ProxyRetryConfig     `json:"proxy_retry,omitempty"`
+	ProxyHealth    *config.ProxyHealthConfig    `json:"proxy_health,omitempty"`
+	ModelFallback  *map[string]string           `json:"model_fallback,omitempty"`
+	ContentRefusal *config.ContentRefusalConfig `json:"content_refusal,omitempty"`
+	Upstream       config.UpstreamConfig        `json:"upstream"`
+	Retry          config.RetryConfig           `json:"retry"`
+	Models         config.ModelsConfig          `json:"models"`
+	Performance    config.PerformanceConfig     `json:"performance"`
+	Logging        config.LoggingConfig         `json:"logging"`
+	Prefer         config.Tier                  `json:"prefer"`
 	// A pointer distinguishes an omitted field (legacy clients should keep the
 	// current reasoning configuration) from an explicit empty object (clear it).
 	Reasoning *config.ReasoningConfig `json:"reasoning,omitempty"`
@@ -251,11 +253,15 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.ProxyHealth != nil {
 		proxyHealth = *update.ProxyHealth
 	}
+	contentRefusal := current.ContentRefusal
+	if update.ContentRefusal != nil {
+		contentRefusal = *update.ContentRefusal
+	}
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
-		ProxyByModel: proxyByModel, ProxyRetry: proxyRetry, ProxyHealth: proxyHealth, ModelFallback: modelFallback,
+		ProxyByModel: proxyByModel, ProxyRetry: proxyRetry, ProxyHealth: proxyHealth, ModelFallback: modelFallback, ContentRefusal: contentRefusal,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
@@ -382,7 +388,7 @@ func (a *Server) configView() ConfigView {
 	effective, restart := a.manager.RestartStatus()
 	return ConfigView{
 		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
-		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, EffectiveProxies: maskSecrets(cfg.RuntimeProxies(), true), ProxyByModel: maskProxyPools(cfg.ProxyByModel), ProxyRetry: cfg.ProxyRetry, ProxyHealth: cfg.ProxyHealth, ModelFallback: cfg.ModelFallback, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models, Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
+		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, EffectiveProxies: maskSecrets(cfg.RuntimeProxies(), true), ProxyByModel: maskProxyPools(cfg.ProxyByModel), ProxyRetry: cfg.ProxyRetry, ProxyHealth: cfg.ProxyHealth, ModelFallback: cfg.ModelFallback, ContentRefusal: cfg.ContentRefusal, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models, Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},
 		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled},
 		Restart:   restart,
