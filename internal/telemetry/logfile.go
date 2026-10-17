@@ -103,25 +103,33 @@ func (l *LogFile) closeLocked() {
 // the active file to path+".1" and reopens, keeping exactly one backup.
 func (l *LogFile) Write(p []byte) (int, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.file == nil {
 		// Consume the bytes so the caller's count stays correct.
+		l.mu.Unlock()
 		return len(p), nil
 	}
 	n, err := l.file.Write(p)
 	l.size += int64(n)
+	var pending error
 	if err == nil && l.size >= logFileLimit {
-		l.rotateLocked()
+		pending = l.rotateLocked()
+	}
+	l.mu.Unlock()
+	if pending != nil {
+		// Reported outside the lock: the callback fans out through the same
+		// logger that writes here, so invoking it under mu would self-deadlock.
+		l.report(pending)
 	}
 	return n, err
 }
 
 // rotateLocked moves the active file aside and starts a fresh one. A failed
-// rotation is not fatal: the handle stays open and keeps appending.
-func (l *LogFile) rotateLocked() {
+// rotation is not fatal: the handle stays open and keeps appending. It
+// returns a problem to surface, or nil; the caller reports it after unlocking.
+func (l *LogFile) rotateLocked() error {
 	path := l.path
 	if path == "" {
-		return
+		return nil
 	}
 	backup := path + ".1"
 	_ = l.file.Close()
@@ -130,26 +138,26 @@ func (l *LogFile) rotateLocked() {
 		// Reopen the original path and keep going.
 		if file, reopenErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); reopenErr == nil {
 			l.file = file
-			l.reportLocked(fmt.Errorf("log rotation rename failed, continuing in place: %w", err))
-		} else {
-			l.reportLocked(fmt.Errorf("log rotation failed, file logging disabled: %w", reopenErr))
-			l.path, l.size = "", 0
-			return
+			return fmt.Errorf("log rotation rename failed, continuing in place: %w", err)
 		}
-	} else {
-		file, reopenErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if reopenErr != nil {
-			l.reportLocked(fmt.Errorf("log reopen after rotation failed, file logging disabled: %w", reopenErr))
-			l.path, l.size = "", 0
-			return
-		}
-		l.file = file
+		l.path, l.size = "", 0
+		return fmt.Errorf("log rotation failed, file logging disabled: %w", err)
 	}
+	file, reopenErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if reopenErr != nil {
+		l.path, l.size = "", 0
+		return fmt.Errorf("log reopen after rotation failed, file logging disabled: %w", reopenErr)
+	}
+	l.file = file
 	l.size = 0
+	return nil
 }
 
-func (l *LogFile) reportLocked(err error) {
-	if l.onError != nil {
-		l.onError(err)
+func (l *LogFile) report(err error) {
+	l.mu.Lock()
+	cb := l.onError
+	l.mu.Unlock()
+	if cb != nil {
+		cb(err)
 	}
 }
