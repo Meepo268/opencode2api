@@ -45,6 +45,39 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 	return item.AutoEffort.Effort
 }
 
+// appliedEffort returns the thinking level actually sent upstream for a
+// request, honouring the fixed precedence by-model > client > default.
+//
+// resolvedEffort alone is the operator-specified level; the gateway only
+// writes it over a client-stated level when a named per-model override wins
+// under by_model_first (see prepareRouteBodies). Reading the client level
+// from the external payload with the same precedence mirrors exactly what
+// the finished upstream body carries, so telemetry shows what was sent
+// instead of what was configured. "none" is reported as-is when it wins:
+// the wire slot is deleted then, but the request was still served disabled.
+func (g *Gateway) appliedEffort(external wire.Protocol, model string, tier config.Tier, protocol wire.Protocol, payload map[string]any) string {
+	clientEffort, clientOK := wire.StatedEffort(external, payload)
+	if clientOK && strings.TrimSpace(clientEffort) == "" {
+		clientOK = false
+		clientEffort = ""
+	}
+	resolved := g.resolvedEffort(model, tier, protocol)
+	if resolved == "" {
+		if clientOK {
+			return clientEffort
+		}
+		return ""
+	}
+	if !clientOK {
+		return resolved
+	}
+	_, fromByModel := g.cfg.ByModelEffort(model)
+	if fromByModel && g.cfg.Reasoning.ByModelFirst() {
+		return resolved
+	}
+	return clientEffort
+}
+
 func probePayload(model string, protocol wire.Protocol, effort string, legacy bool) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
@@ -58,7 +91,7 @@ func probePayload(model string, protocol wire.Protocol, effort string, legacy bo
 		return nil, err
 	}
 	if effort != "" {
-		wire.ForcedEffort(protocol, converted, effort)
+		wire.ForcedEffort(protocol, converted, effort, false)
 	}
 	b, err := json.Marshal(converted)
 	if err != nil {

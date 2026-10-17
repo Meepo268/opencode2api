@@ -272,6 +272,7 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 | `models.protocols`         | `{}`; ghi đè giao thức gốc theo từng mô hình.                   |
 | `models.free_only`         | `false`; chỉ công khai và định tuyến mô hình miễn phí, kể cả khi có key Zen hoặc Go. |
 | `reasoning.effort`         | Rỗng (tắt); `minimal`, `low`, `medium`, `high`, `xhigh`, `max` hoặc `none`. |
+| `reasoning.precedence`     | `client_first` (mặc định); `by_model_first` để ghi đè thắng.    |
 | `reasoning.effort_by_model`| `{}`; ghi đè `reasoning.effort` theo từng mô hình.              |
 
 ### Bậc suy luận bị ép
@@ -282,16 +283,17 @@ Xem [config.example.json](config.example.json) để có một cấu hình khở
 {
   "reasoning": {
     "effort": "high",
+    "precedence": "client_first",
     "effort_by_model": { "claude-opus-5": "max" }
   }
 }
 ```
 
-Bậc do client nêu tường minh luôn thắng, nên thiết lập này chỉ thay thế một bậc mà không ai yêu cầu: bậc bị thiếu, hoặc bậc suy ra từ `thinking.budget_tokens`. Dùng `"none"` để loại bỏ reasoning khỏi các request không yêu cầu nó.
+`reasoning.precedence` quyết định bên nào thắng khi client nêu một bậc và một ghi đè theo mô hình cũng áp dụng. Mặc định `client_first` giữ bậc của client và chỉ dùng ghi đè cho các request còn lại, kể cả bậc suy ra từ `thinking.budget_tokens`. Đặt `by_model_first` để ghi đè thay thế cả bậc client nêu tường minh; các mô hình nằm ngoài bảng ghi đè và các request không được bảng này nêu vẫn giữ nguyên. Dù chọn cách nào, `reasoning.effort` mặc định chỉ lấp bậc mà không ai yêu cầu. Dùng `"none"` để loại bỏ reasoning khỏi các request không yêu cầu nó.
 
 Các bậc được báo trung thực theo cả hai chiều. Một `output_config.effort` tường minh sống sót qua chuyển đổi thay vì bị khối `thinking` che khuất, `budget_tokens` giữ đúng bậc của nó (`8192` là `high`, `32000` là `xhigh`, nên hai mức vẫn phân biệt được), và phía Responses mang bậc này dưới dạng `reasoning.effort` thay vì bỏ mất.
 
-Trung tâm cấu hình của WebUI cung cấp cùng các trường mặc định và theo mô hình. API quản trị trả chúng dưới trường `reasoning` từ `GET /api/config` và nhận đối tượng đó trong `PUT /api/config`; client bỏ qua trường sẽ giữ giá trị hiện tại, còn gửi đối tượng rỗng sẽ xoá nó.
+Trung tâm cấu hình của WebUI cung cấp cùng các trường mặc định, mức ưu tiên và theo mô hình. API quản trị trả chúng dưới trường `reasoning` từ `GET /api/config` và nhận đối tượng đó trong `PUT /api/config`; client bỏ qua trường sẽ giữ giá trị hiện tại, còn gửi đối tượng rỗng sẽ xoá nó.
 
 Các mục proxy nhận `direct`, `http://`, `https://`, `socks5://` và `socks5h://`, kể cả credential trong URL. Danh sách nội tuyến được gộp với `proxyfile` và khử trùng lặp theo thứ tự.
 
@@ -418,7 +420,7 @@ Key, proxy, URL upstream, thiết lập retry, thiết lập mô hình, nhật k
 
 Kết quả request mô tả lần suy luận đã hoàn tất. Một phản hồi SSE thất bại hoặc luồng bị cắt cụt vẫn được tính là lỗi kể cả khi HTTP 200 đã được gửi; kết quả của nó là `stream_error`. Việc client huỷ được ghi là `client_canceled`. WebUI hiển thị các kết quả đó bên cạnh mã trạng thái HTTP.
 
-Bản ghi **lần thử** upstream đo trao đổi HTTP tính tới lúc nhận được header phản hồi. Thành công và độ trễ của nó tách biệt với việc hoàn tất toàn bộ body JSON hoặc luồng.
+Bản ghi **lần thử** upstream đo trao đổi HTTP tính tới lúc nhận được header phản hồi. Thành công và độ trễ của nó tách biệt với việc hoàn tất toàn bộ body JSON hoặc luồng. Cả bản ghi request lẫn bản ghi lần thử đều mang cường độ suy luận thực sự đã áp dụng dưới trường `effort`, nên một khối lượng công việc trộn lẫn cường độ của client, ghi đè theo mô hình và giá trị mặc định vẫn đọc được theo từng dòng.
 
 Thống kê token chỉ dùng usage được báo. Token input bao gồm đọc và ghi cache; token cache riêng đếm các lần đọc cache. Usage thiếu không được ước tính, và độ phủ cho biết bao nhiêu request suy luận đã định tuyến có báo usage. `usage.server_keys` tách request và token theo server key cục bộ mà caller đã xác thực (vân tay của nó, như hiển thị ở `/api/api-keys`); lưu lượng Playground được tính dưới mục `playground`.
 
@@ -512,7 +514,7 @@ Cảm ơn cộng đồng [LINUX DO](https://linux.do) đã ủng hộ.
 
 ### Cường độ suy luận thích ứng
 
-Đặt `reasoning.effort` (hoặc ghi đè theo mô hình) là `auto` để dùng cường độ cao nhất đã được bộ dò mô hình miễn phí xác minh thành công. Các bậc cụ thể sẵn có giữ nguyên ý nghĩa và cường độ do client chỉ định được ưu tiên. Không có danh sách cho phép theo tên mô hình nào được duy trì.
+Đặt `reasoning.effort` (hoặc ghi đè theo mô hình) là `auto` để dùng cường độ cao nhất đã được bộ dò mô hình miễn phí xác minh thành công. Các bậc cụ thể sẵn có giữ nguyên ý nghĩa và theo mức ưu tiên mặc định, cường độ do client chỉ định được ưu tiên (xem `reasoning.precedence`). Không có danh sách cho phép theo tên mô hình nào được duy trì.
 
 Sau khi một mức nền thành công, các mô hình có suy luận được dò theo thứ tự `max`, `xhigh`, `high`, `medium`, `low`, `minimal`. Chỉ khi có tham số suy luận bị từ chối tường minh mới chuyển xuống bậc thấp hơn. Lỗi tạm thời sẽ dừng tìm kiếm và không thể bị hiểu là trần năng lực thấp hơn. Nếu mọi bậc đều bị từ chối, không có ghi đè suy luận nào được chèn vào.
 

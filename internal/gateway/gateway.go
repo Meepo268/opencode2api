@@ -226,7 +226,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 						model = fallback
 						if meta != nil {
 							meta.Model = fallback
-							meta.Effort = g.resolvedEffort(fallback, fallbackRoute.Tier, fallbackRoute.Protocol)
+							meta.Effort = g.appliedEffort(external, fallback, fallbackRoute.Tier, fallbackRoute.Protocol, payload)
 						}
 						w.Header().Set("x-resolved-model", fallback)
 					} else {
@@ -274,7 +274,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if meta != nil {
 			meta.Tier = string(upstreamRoute.Tier)
 			meta.Protocol = upstreamRoute.Protocol
-			meta.Effort = g.resolvedEffort(model, upstreamRoute.Tier, upstreamRoute.Protocol)
+			meta.Effort = g.appliedEffort(external, model, upstreamRoute.Tier, upstreamRoute.Protocol, payload)
 		}
 		w.Header().Set("x-request-id", ids.Request)
 		if resp.StatusCode/100 != 2 {
@@ -294,7 +294,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 								meta.Model = fallback
 								meta.Tier = string(upstreamRoute.Tier)
 								meta.Protocol = upstreamRoute.Protocol
-								meta.Effort = g.resolvedEffort(fallback, upstreamRoute.Tier, upstreamRoute.Protocol)
+								meta.Effort = g.appliedEffort(external, fallback, upstreamRoute.Tier, upstreamRoute.Protocol, payload)
 							}
 							w.Header().Set("x-resolved-model", fallback)
 							defer resp.Body.Close()
@@ -640,7 +640,12 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 			return nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)
 		}
 		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
-			wire.ForcedEffort(protocol, upstreamPayload, effort)
+			// Only a named per-model override may overwrite a client-stated
+			// level, and only under by_model_first. The default level always
+			// yields to the client, preserving the fixed order
+			// by-model > client > default.
+			_, fromByModel := g.cfg.ByModelEffort(jsonutil.StringAt(upstreamPayload, "model"))
+			wire.ForcedEffort(protocol, upstreamPayload, effort, fromByModel && g.cfg.Reasoning.ByModelFirst())
 		}
 		encoded, err := json.Marshal(upstreamPayload)
 		if err != nil {

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -68,13 +69,19 @@ func stripGatewayReasoningInputs(output map[string]any) bool {
 // upstream body, so a client can be served at a fixed level without the client
 // cooperating.
 //
-// A level the client stated explicitly always wins. That is what the "forced"
-// level is for: replacing a level nobody actually asked for, either because the
-// request said nothing about reasoning or because the conversion had to derive
-// one from thinking.budget_tokens. It is applied to the finished upstream body
-// rather than to the bridge value because the same-protocol path never goes
-// through the bridge, and only there can the client's own body be seen.
-func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
+// A level the client stated explicitly wins unless overwrite is set. That is
+// what the "forced" level is for: replacing a level nobody actually asked for,
+// either because the request said nothing about reasoning or because the
+// conversion had to derive one from thinking.budget_tokens. It is applied to
+// the finished upstream body rather than to the bridge value because the
+// same-protocol path never goes through the bridge, and only there can the
+// client's own body be seen.
+//
+// overwrite skips the client-wins guard so a named per-model level can replace
+// a level the client stated explicitly. It must only be set when the level
+// comes from a per-model override under a by_model_first precedence; the
+// default level always yields to the client.
+func ForcedEffort(protocol Protocol, body map[string]any, effort string, overwrite bool) {
 	if body == nil {
 		return
 	}
@@ -85,7 +92,7 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 	disable := effort == "none"
 	switch protocol {
 	case Chat:
-		if clientEffortExplicit(protocol, body) {
+		if !overwrite && clientEffortExplicit(protocol, body) {
 			return
 		}
 		if disable {
@@ -94,12 +101,12 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 		}
 		body["reasoning_effort"] = effort
 	case Anthropic:
-		if clientEffortExplicit(protocol, body) {
+		if !overwrite && clientEffortExplicit(protocol, body) {
 			return
 		}
 		applyAnthropicForcedEffort(body, effort, disable)
 	case Responses:
-		if clientEffortExplicit(protocol, body) {
+		if !overwrite && clientEffortExplicit(protocol, body) {
 			return
 		}
 		if disable {
@@ -124,22 +131,49 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 // reasoning.effort. Anything else in those slots is a structural value the
 // conversion produced, which a forced level is allowed to replace.
 func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
+	_, ok := StatedEffort(protocol, body)
+	return ok
+}
+
+// StatedEffort returns the thinking level a body states in its protocol-native
+// slot, and whether the slot holds one. After ForcedEffort runs, the slot
+// holds the level actually sent upstream, whatever its origin, so the same
+// reader serves both the client-wins guard and the sent-level display.
+func StatedEffort(protocol Protocol, body map[string]any) (string, bool) {
+	if body == nil {
+		return "", false
+	}
 	switch protocol {
 	case Chat:
-		_, ok := body["reasoning_effort"].(string)
-		return ok
+		effort, ok := body["reasoning_effort"].(string)
+		return effort, ok
 	case Anthropic:
 		if effort, ok := jsonutil.AnyAt(body, "output_config", "effort").(string); ok && strings.TrimSpace(effort) != "" {
-			return true
+			return effort, true
 		}
 		effort, ok := body["effort"].(string)
-		return ok && strings.TrimSpace(effort) != ""
+		return effort, ok && strings.TrimSpace(effort) != ""
 	case Responses:
-		_, ok := jsonutil.AnyAt(body, "reasoning", "effort").(string)
-		return ok
+		effort, ok := jsonutil.AnyAt(body, "reasoning", "effort").(string)
+		return effort, ok
 	default:
-		return false
+		return "", false
 	}
+}
+
+// BodyEffort reads the thinking level carried by a finished upstream body,
+// i.e. the level actually sent upstream. It returns "" when the body carries
+// none (the upstream then applies its own default) or is not valid JSON.
+func BodyEffort(protocol Protocol, raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return ""
+	}
+	effort, _ := StatedEffort(protocol, body)
+	return effort
 }
 
 // applyAnthropicForcedEffort writes a forced level into an Anthropic body and

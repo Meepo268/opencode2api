@@ -383,7 +383,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				break
 			}
 			nodeResp, nodeErr = resp, err
-			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
+			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration, wire.BodyEffort(route.Protocol, preparedBodies[index]))
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
 				g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
@@ -962,7 +962,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	started := time.Now()
 	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 	duration := time.Since(started)
-	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration)
+	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration, wire.BodyEffort(route.Protocol, body))
 	if err != nil {
 		return nil, asProxyUnavailable(proxy, err), 1
 	}
@@ -1051,7 +1051,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			break
 		}
 		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)
-		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
+		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration, wire.BodyEffort(route.Protocol, body))
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds())
 			return resp, nil, attempts
@@ -1164,7 +1164,7 @@ func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, 
 			break
 		}
 		g.observeKeyResult(ctx, nodes, node, proxy, resp, err)
-		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
+		g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration, wire.BodyEffort(route.Protocol, body))
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds(), "model_pool", true)
 			return resp, nil, attempts
@@ -1250,7 +1250,7 @@ func requestCredential(ctx context.Context) (string, string, bool) {
 	return meta.KeyID, meta.Channel, meta.Anonymous
 }
 
-func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route, ids identity.RequestIDs, attempt int, keyID, channel string, anonymous bool, proxy *proxyTransport, resp *http.Response, err error, duration time.Duration) {
+func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route, ids identity.RequestIDs, attempt int, keyID, channel string, anonymous bool, proxy *proxyTransport, resp *http.Response, err error, duration time.Duration, effort string) {
 	status := upstreamStatus(resp)
 	success := err == nil && status >= 200 && status < 300
 	outcome := "retryable_failure"
@@ -1291,7 +1291,7 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 		Time: time.Now().UTC(), RequestID: ids.Request, Model: route.ID, Tier: string(route.Tier), Attempt: attempt,
 		KeyID: keyID, Channel: channel, Anonymous: anonymous, Proxy: proxyName, Status: status,
 		DurationMS: max(duration.Milliseconds(), 0), Success: success, Outcome: outcome,
-		Effort: g.resolvedEffort(route.ID, route.Tier, route.Protocol),
+		Effort: effort,
 	})
 }
 
