@@ -231,12 +231,20 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.ModelFallback != nil {
 		modelFallback = *update.ModelFallback
 	}
+	// The admin API replaces the whole logging section, but the WebUI form does
+	// not render file_path yet: keeping the current path when the update does
+	// not carry one stops a console save from silently disabling file logging.
+	// Clearing the path stays a config-file operation.
+	logging := update.Logging
+	if logging.FilePath == "" {
+		logging.FilePath = current.Logging.FilePath
+	}
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
 		ProxyByModel: proxyByModel, ProxyRetry: proxyRetry, ModelFallback: modelFallback,
-		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
+		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}
