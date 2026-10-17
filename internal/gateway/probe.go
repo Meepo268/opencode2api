@@ -68,6 +68,15 @@ func probePayload(model string, protocol wire.Protocol, effort string, legacy bo
 	return shaped, nil
 }
 
+// Probe scans are bounded: one probe is a full upstream request, so sweeping
+// every configured exit on every availability cycle would multiply probe
+// traffic by the pool size. Two siblings per lane are enough to distinguish
+// "this exit is out of quota" from "the model is gone".
+const (
+	maxProbeAnonymousExits = 2
+	maxProbeKeys           = 2
+)
+
 func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult {
 	if !g.catalog.IsFreeModel(model) {
 		return probeResult{reason: "not_free"}
@@ -85,16 +94,20 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 	}
 	var lanes []lane
 	if g.cfg.Anonymous {
-		// Scan every healthy anonymous exit, not just the affinity-pinned
-		// first one: the anonymous lane is rate-limited per exit IP, so one
-		// quota-exhausted exit must not fail the whole model while others
-		// serve it fine (real traffic spreads across all of them).
+		// Probe a couple of sibling anonymous exits, not just the
+		// affinity-pinned first one: the anonymous lane is rate-limited per
+		// exit IP, so one quota-exhausted exit must not fail the whole model
+		// while others serve it fine. The scan is capped because every probe
+		// is a real upstream request and an unbounded sweep would multiply
+		// probe traffic by the number of configured exits.
 		cursor := g.anonymous.CursorFor(ids.Session)
-		for attempt := 0; attempt < g.anonymous.Len(); attempt++ {
+		exits := 0
+		for attempt := 0; attempt < g.anonymous.Len() && exits < maxProbeAnonymousExits; attempt++ {
 			node := cursor.Next()
 			if node == nil {
 				break
 			}
+			exits++
 			// Prefer the legacy /zen/v1 lane before falling back to /inference.
 			for _, baseURL := range g.anonymousUpstreams() {
 				lanes = append(lanes, lane{anonymousZenKey, "anonymous", baseURL, node.proxy.client, config.RedactURL(node.proxy.name)})
@@ -102,16 +115,18 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 		}
 	}
 	// Likewise, one bad key must not decide the verdict while sibling keys
-	// in the same tier are healthy.
+	// in the same tier are healthy. Bounded for the same traffic reason.
 	seen := make(map[*upstreamNode]bool, g.zenNodes.Len())
 	zcursor := g.zenNodes.CursorFor(ids.Session)
-	for i := 0; i < g.zenNodes.Len(); i++ {
+	keys := 0
+	for i := 0; i < g.zenNodes.Len() && keys < maxProbeKeys; i++ {
 		node := zcursor.Next()
 		if node == nil || seen[node] {
 			break
 		}
 		seen[node] = true
 		if proxy := g.zenNodes.Proxy(node); proxy != nil {
+			keys++
 			lanes = append(lanes, lane{node.key, "zen", g.cfg.Upstream.Zen, proxy.client, config.RedactURL(proxy.name)})
 		}
 	}
