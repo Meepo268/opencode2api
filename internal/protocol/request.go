@@ -23,9 +23,45 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 		// The bridge already floors converted bodies; a same-protocol body is
 		// a clone of the client's and needs the same guard.
 		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
+		// Same-protocol Responses→Responses bodies are cloned verbatim and
+		// never go through the bridge, so gateway-minted reasoning ids
+		// (rs_gw_) replayed from client history would reach the upstream
+		// and fail with a stale reasoning-reference 400. The bridge path
+		// already drops these via encodeResponsesReasoningInput; strip them
+		// here to cover the direct-clone path. Anonymous shaping afterwards
+		// only touches stream/tools via JSON round-trip and preserves this.
+		stripGatewayReasoningInputs(output)
 	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
 	return output, nil
+}
+
+// stripGatewayReasoningInputs drops Responses reasoning items carrying a
+// gateway-minted id (gatewayReasoningIDPrefix). The emitter synthesizes such
+// ids when the upstream omits a reasoning id; replaying them upstream always
+// fails because the upstream never issued them. Cross-protocol bodies are
+// already cleaned by encodeResponsesReasoningInput, so this covers the
+// same-protocol clone path where ConvertRequest bypasses the bridge.
+func stripGatewayReasoningInputs(output map[string]any) bool {
+	items, ok := output["input"].([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	kept := make([]any, 0, len(items))
+	changed := false
+	for _, raw := range items {
+		if item, ok := raw.(map[string]any); ok &&
+			jsonutil.StringAt(item, "type") == "reasoning" &&
+			strings.HasPrefix(jsonutil.StringAt(item, "id"), gatewayReasoningIDPrefix) {
+			changed = true
+			continue
+		}
+		kept = append(kept, raw)
+	}
+	if changed {
+		output["input"] = kept
+	}
+	return changed
 }
 
 // ForcedEffort applies an operator-configured thinking level to a prepared
