@@ -158,16 +158,19 @@ type SecretInput struct {
 }
 
 type ConfigUpdate struct {
-	Listen        string                   `json:"listen"`
-	ServerKeys    []SecretInput            `json:"server_keys"`
-	ZenKeys       []SecretInput            `json:"zen_keys"`
-	GoKeys        []SecretInput            `json:"go_keys"`
-	Anonymous     bool                     `json:"anonymous"`
-	Proxies       []SecretInput            `json:"proxies"`
-	ProxyFile     string                   `json:"proxyfile"`
-	ProxyByModel  map[string][]string      `json:"proxy_by_model,omitempty"`
-	ProxyRetry    config.ProxyRetryConfig  `json:"proxy_retry,omitempty"`
-	ModelFallback map[string]string        `json:"model_fallback,omitempty"`
+	Listen     string        `json:"listen"`
+	ServerKeys []SecretInput `json:"server_keys"`
+	ZenKeys    []SecretInput `json:"zen_keys"`
+	GoKeys     []SecretInput `json:"go_keys"`
+	Anonymous  bool          `json:"anonymous"`
+	Proxies    []SecretInput `json:"proxies"`
+	ProxyFile  string        `json:"proxyfile"`
+	// Pointers distinguish an omitted field (keep the current pools/fallback,
+	// which is what a WebUI save that does not render them yet implies) from an
+	// explicit empty object (clear it).
+	ProxyByModel  *map[string][]string     `json:"proxy_by_model,omitempty"`
+	ProxyRetry    *config.ProxyRetryConfig `json:"proxy_retry,omitempty"`
+	ModelFallback *map[string]string       `json:"model_fallback,omitempty"`
 	Upstream      config.UpstreamConfig    `json:"upstream"`
 	Retry         config.RetryConfig       `json:"retry"`
 	Models        config.ModelsConfig      `json:"models"`
@@ -216,11 +219,23 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
 	}
+	proxyByModel := current.ProxyByModel
+	if update.ProxyByModel != nil {
+		proxyByModel = *update.ProxyByModel
+	}
+	proxyRetry := current.ProxyRetry
+	if update.ProxyRetry != nil {
+		proxyRetry = *update.ProxyRetry
+	}
+	modelFallback := current.ModelFallback
+	if update.ModelFallback != nil {
+		modelFallback = *update.ModelFallback
+	}
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
 		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
-		ProxyByModel: update.ProxyByModel, ProxyRetry: update.ProxyRetry, ModelFallback: update.ModelFallback,
+		ProxyByModel: proxyByModel, ProxyRetry: proxyRetry, ModelFallback: modelFallback,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
