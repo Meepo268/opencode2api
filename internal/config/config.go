@@ -28,6 +28,7 @@ type Config struct {
 	ProxyFile         string                       `json:"proxyfile"`
 	ProxyByModel      map[string][]string          `json:"proxy_by_model,omitempty"`
 	ProxyRetry        ProxyRetryConfig             `json:"proxy_retry,omitempty"`
+	ProxyHealth       ProxyHealthConfig            `json:"proxy_health,omitempty"`
 	ModelFallback     map[string]string            `json:"model_fallback,omitempty"`
 	Upstream          UpstreamConfig               `json:"upstream"`
 	Retry             RetryConfig                  `json:"retry"`
@@ -77,6 +78,48 @@ type ProxyRetryConfig struct {
 type RetryConfig struct {
 	MaxAttempts    int `json:"max_attempts"`
 	TimeoutSeconds int `json:"timeout_seconds"`
+	// SleepOnRotation restores the historical behavior of sleeping
+	// proxy_retry.interval_seconds before every retry, including retries
+	// that move to a fresh key or proxy. The default (false) only sleeps
+	// before a sticky retry of the same node: rotation itself is already
+	// the mitigation, so waiting before trying fresh capacity only delays
+	// recovery.
+	SleepOnRotation bool `json:"sleep_on_rotation,omitempty"`
+}
+
+// ProxyHealthConfig controls how bad proxies are marked and re-probed.
+// Probing only ever targets proxies already marked unhealthy; healthy
+// proxies are never disturbed.
+type ProxyHealthConfig struct {
+	// ProbeIntervalMinutes is how often an unhealthy proxy gets a lightweight
+	// connectivity probe. Non-positive values take the default.
+	ProbeIntervalMinutes int `json:"probe_interval_minutes,omitempty"`
+	// ProbeTimeoutSeconds bounds one probe. Non-positive takes the default.
+	ProbeTimeoutSeconds int `json:"probe_timeout_seconds,omitempty"`
+	// ProbeURL is fetched through the proxy under test. Empty takes the default
+	// captive-portal check endpoint.
+	ProbeURL string `json:"probe_url,omitempty"`
+	// MaxProbeBackoffMinutes caps the exponential backoff between probes of a
+	// proxy that keeps failing. Probing never stops entirely: without a live
+	// recheck a long outage would permanently condemn the proxy.
+	MaxProbeBackoffMinutes int `json:"max_probe_backoff_minutes,omitempty"`
+	// Disabled turns off both the scheduled re-probes and the neutral
+	// verify-after-error check. Failure bookkeeping (marking bad proxies,
+	// key/proxy cooldowns, per-request recovery probes) is unaffected.
+	// Zero value false keeps probing enabled, so existing configurations
+	// gain nothing to change.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// DefaultProxyHealth returns the probe policy used when the operator did not
+// configure one.
+func DefaultProxyHealth() ProxyHealthConfig {
+	return ProxyHealthConfig{
+		ProbeIntervalMinutes:   5,
+		ProbeTimeoutSeconds:    5,
+		ProbeURL:               "https://cp.cloudflare.com/generate_204",
+		MaxProbeBackoffMinutes: 60,
+	}
 }
 
 type ModelsConfig struct {
@@ -158,6 +201,7 @@ func Load(path string) (Config, error) {
 		Listen:      "127.0.0.1:8080",
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
+		ProxyHealth: DefaultProxyHealth(),
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
 		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
@@ -300,6 +344,7 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if err := normalizeProxyRetry(&cfg); err != nil {
 		return Config{}, err
 	}
+	normalizeProxyHealth(&cfg)
 	if err := normalizeModelFallback(&cfg); err != nil {
 		return Config{}, err
 	}

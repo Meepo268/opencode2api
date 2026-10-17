@@ -304,7 +304,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	var lastResponse *http.Response
 	var lastErr error
 	cursor := g.anonymous.CursorFor(ids.Session)
-	limit := g.anonymous.Len()
+	// The scan budget covers one sticky retry per exit on top of the first
+	// pass: sticky retries are real upstream requests and count toward
+	// attempts, so the limit reserves headroom for them.
+	limit := 2 * g.anonymous.Len()
 	var allow map[int]bool
 	if g.cfg.HasCustomProxyPool(route.ID) {
 		allowlist := g.cfg.ProxyAllowlistFor(route.ID)
@@ -319,12 +322,21 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		if allowedCount > limit {
 			limit = allowedCount
 		}
+		limit += allowedCount
 	}
 	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
 		limit = g.cfg.Retry.MaxAttempts
 	}
 	proxies := 0
 	attempts := 0
+	interval := time.Duration(g.cfg.ProxyRetry.IntervalSeconds) * time.Second
+	// Sticky-first retry: a transport failure retries the SAME exit once after
+	// a short wait before rotating, preserving session affinity (and cache
+	// locality). tried bounds repeats per exit; a single un-slept recovery
+	// probe per loop, then the tier stops instead of burning.
+	var sticky *anonymousNode
+	tried := make(map[int]bool)
+	recoveryUsed := false
 	rawBody := bodies[config.TierZen]
 	if len(rawBody) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
@@ -351,23 +363,54 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			break
 		}
-		node := cursor.NextAllowed(allow)
-		if node == nil {
-			// Custom pools may retry allowed exits: start a fresh scan so
-			// proxy_retry.max_attempts can exceed the pool size. Stop when
-			// no allowed proxy is healthy at all.
-			if allow != nil && attempts < limit {
-				cursor = g.anonymous.CursorFor(ids.Session)
-				node = cursor.NextAllowed(allow)
-			}
+		node := (*anonymousNode)(nil)
+		stickyAttempt := false
+		if sticky != nil {
+			// Sticky retry of the exit that just failed with a transport
+			// error: a seconds-long blip heals here without losing the
+			// session's exit affinity.
+			node, sticky = sticky, nil
+			stickyAttempt = true
+		} else {
+			node = cursor.NextAllowed(allow)
 			if node == nil {
-				break
+				// Custom pools may retry allowed exits: start a fresh scan so
+				// proxy_retry.max_attempts can exceed the pool size. Stop when
+				// no allowed proxy is healthy at all.
+				if allow != nil && attempts < limit {
+					cursor = g.anonymous.CursorFor(ids.Session)
+					node = cursor.NextAllowed(allow)
+				}
+				if node == nil {
+					break
+				}
+			}
+			if tried[node.proxy.index] {
+				// Every allowed exit was already tried: one un-slept
+				// recovery probe, then stop. Sleeping before a known-bad
+				// exit only delays the fallback.
+				if recoveryUsed {
+					g.logger.Debug("anonymous pool exhausted; stopping tier", "component", "upstream", "event", "tier_stopped", "request_id", ids.Request, "reason", "recovery_exhausted", "attempts", attempts)
+					break
+				}
+				recoveryUsed = true
+				g.logger.Debug("anonymous recovery probe", "component", "upstream", "event", "attempt_recovery_probe", "request_id", ids.Request, "attempt", attempts+1, "proxy", config.RedactURL(node.proxy.name))
+			} else if attempts > 0 && lastErr != nil && interval > 0 && g.cfg.Retry.SleepOnRotation {
+				// Legacy behavior: sleep before every rotation. The default
+				// skips it — rotation itself is the mitigation, and the
+				// sticky retry above is where waiting pays off.
+				if !sleepWithContext(ctx, interval) {
+					break
+				}
 			}
 		}
-		if attempts > 0 && lastErr != nil && g.cfg.ProxyRetry.IntervalSeconds > 0 {
-			if !sleepWithContext(ctx, time.Duration(g.cfg.ProxyRetry.IntervalSeconds)*time.Second) {
-				break
+		if stickyAttempt {
+			if interval > 0 {
+				if !sleepWithContext(ctx, interval) {
+					break
+				}
 			}
+			g.logger.Debug("anonymous sticky retry", "component", "upstream", "event", "attempt_sticky_retry", "request_id", ids.Request, "attempt", attempts+1, "proxy", config.RedactURL(node.proxy.name))
 		}
 		proxies++
 		var nodeResp *http.Response
@@ -435,6 +478,14 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			break
 		}
 		g.observeAnonymousResult(ctx, node, nodeResp, nodeErr)
+		tried[node.proxy.index] = true
+		if nodeErr != nil && !stickyAttempt {
+			// Arm one sticky retry of this same exit: if the failure was a
+			// seconds-long blip, the wait-then-retry heals without losing
+			// the session's exit affinity. A genuinely dead exit fails the
+			// sticky fast and is then skipped by tried/recovery above.
+			sticky = node
+		}
 	}
 	if lastResponse != nil {
 		return lastResponse, nil, attempts
@@ -971,6 +1022,17 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		meta.ToolAlias = alias
 	}
 	proxy := nodes.Proxy(node)
+	if g.cfg.HasCustomProxyPool(route.ID) {
+		// A model with an explicit proxy pool must leave through that pool
+		// even in diagnostics: production traffic for this model uses
+		// doKeyUpstreamAllowed, so testing the key through its sticky
+		// binding would answer a question nobody asked (and can geo-fence
+		// the attempt, e.g. via direct) while the real path stays healthy.
+		if allowed := allowedProxiesInOrder(g.transports, g.cfg.ProxyAllowlistFor(route.ID)); len(allowed) > 0 {
+			proxy = pickAllowedProxy(allowed, proxyAffinityOffset(ids.Session+"\x00"+route.ID, len(allowed)), 0)
+			g.logger.Debug("selected key uses model proxy pool", "component", "upstream", "event", "selected_key_proxy_pool", "request_id", ids.Request, "model", route.ID, "key_id", config.KeyDisplayID(node.key), "proxy", config.RedactURL(proxy.name))
+		}
+	}
 	if proxy == nil {
 		return nil, errors.New("selected upstream key has no proxy binding"), 0
 	}
@@ -1014,6 +1076,9 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		return nil, fmt.Errorf("no %s nodes configured", route.Tier), 0
 	}
 	attempts := 0
+	// authDead drops keys that already returned 401/403 for this request so
+	// the remaining budget is spent on keys that might work.
+	authDead := make(map[*upstreamNode]bool)
 	body := bodies[route.Tier]
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
@@ -1037,6 +1102,12 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		}
 		node := cursor.Next()
 		if node == nil {
+			break
+		}
+		if authDead[node] {
+			// This key already returned 401/403 for this request: rotating
+			// back to it only burns budget.
+			g.logger.Debug("key tier stopped; key already rejected", "component", "upstream", "event", "tier_stopped", "request_id", ids.Request, "reason", "auth_dead_key", "tier", route.Tier, "key_id", config.KeyDisplayID(node.key), "attempts", attempts)
 			break
 		}
 		attempts++
@@ -1097,6 +1168,9 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		if err != nil {
 			g.logger.Debug("upstream transport attempt failed", "component", "upstream", "event", "attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "error", err)
 		} else {
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				authDead[node] = true
+			}
 			g.logger.Debug("upstream returned a retryable response", "component", "upstream", "event", "attempt_retryable_response", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "status", resp.StatusCode, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds())
 		}
 	}
@@ -1133,6 +1207,15 @@ func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, 
 	interval := time.Duration(g.cfg.ProxyRetry.IntervalSeconds) * time.Second
 	proxyStart := proxyAffinityOffset(ids.Session+"\x00"+route.ID, len(allowed))
 	attempts := 0
+	// Sticky-first retry plus per-request bookkeeping: stickyNode/stickyProxy
+	// hold one same-pair retry; tried bounds repeats per exit; authDead drops
+	// keys that already returned 401/403 for this request; one un-slept
+	// recovery probe per tier, then the tier stops instead of burning.
+	var stickyNode *upstreamNode
+	var stickyProxy *proxyTransport
+	tried := make(map[int]bool)
+	authDead := make(map[*upstreamNode]bool)
+	recoveryUsed := false
 	body := bodies[route.Tier]
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
@@ -1152,19 +1235,52 @@ func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, 
 			}
 			break
 		}
-		if attempts > 0 && lastErr != nil && interval > 0 {
-			if !sleepWithContext(ctx, interval) {
+		var node *upstreamNode
+		var proxy *proxyTransport
+		stickyAttempt := false
+		if stickyNode != nil {
+			// Sticky retry of the same key+proxy pair after a transport
+			// failure: a seconds-long blip heals without losing affinity.
+			node, proxy, stickyNode, stickyProxy = stickyNode, stickyProxy, nil, nil
+			stickyAttempt = true
+		} else {
+			node = cursor.Next()
+			if node == nil {
 				break
 			}
+			if authDead[node] {
+				// This key already proved itself unauthorized for this
+				// request: retrying it burns budget without new information.
+				g.logger.Debug("key tier stopped; key already rejected", "component", "upstream", "event", "tier_stopped", "request_id", ids.Request, "reason", "auth_dead_key", "tier", route.Tier, "key_id", config.KeyDisplayID(node.key), "attempts", attempts)
+				break
+			}
+			proxy = pickAllowedProxy(allowed, proxyStart, attempts)
+			if proxy == nil {
+				lastErr = errors.New("no allowed proxy available for model")
+				break
+			}
+			if tried[proxy.index] {
+				// Every allowed exit was already tried: a single un-slept
+				// recovery probe, then stop instead of burning.
+				if recoveryUsed {
+					g.logger.Debug("model pool exhausted; stopping tier", "component", "upstream", "event", "tier_stopped", "request_id", ids.Request, "reason", "recovery_exhausted", "tier", route.Tier, "attempts", attempts)
+					break
+				}
+				recoveryUsed = true
+				g.logger.Debug("model pool recovery probe", "component", "upstream", "event", "attempt_recovery_probe", "request_id", ids.Request, "attempt", attempts+1, "tier", route.Tier, "proxy", config.RedactURL(proxy.name))
+			} else if attempts > 0 && lastErr != nil && interval > 0 && g.cfg.Retry.SleepOnRotation {
+				if !sleepWithContext(ctx, interval) {
+					break
+				}
+			}
 		}
-		node := cursor.Next()
-		if node == nil {
-			break
-		}
-		proxy := pickAllowedProxy(allowed, proxyStart, attempts)
-		if proxy == nil {
-			lastErr = errors.New("no allowed proxy available for model")
-			break
+		if stickyAttempt {
+			if interval > 0 {
+				if !sleepWithContext(ctx, interval) {
+					break
+				}
+			}
+			g.logger.Debug("model pool sticky retry", "component", "upstream", "event", "attempt_sticky_retry", "request_id", ids.Request, "attempt", attempts+1, "tier", route.Tier, "key_id", config.KeyDisplayID(node.key), "proxy", config.RedactURL(proxy.name))
 		}
 		attempts++
 		if meta := telemetry.MetaFromContext(ctx); meta != nil {
@@ -1203,9 +1319,21 @@ func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, 
 		}
 		lastResponse = resp
 		lastErr = err
+		tried[proxy.index] = true
 		if err != nil {
+			// Arm one sticky retry of this same key+proxy pair before
+			// rotating: a seconds-long blip heals without losing affinity.
+			// A dead pair fails the sticky fast and is then skipped above.
+			if !stickyAttempt {
+				stickyNode, stickyProxy = node, proxy
+			}
 			g.logger.Debug("upstream transport attempt failed", "component", "upstream", "event", "attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "error", err, "model_pool", true)
 		} else {
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				// This key proved itself unauthorized for this request:
+				// rotating back to it only burns budget.
+				authDead[node] = true
+			}
 			g.logger.Debug("upstream returned a retryable response", "component", "upstream", "event", "attempt_retryable_response", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "status", resp.StatusCode, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "model_pool", true)
 		}
 	}

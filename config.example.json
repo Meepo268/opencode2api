@@ -11,6 +11,10 @@
     "max_attempts": 0,
     "interval_seconds": 0
   },
+  "proxy_health": {
+    "disabled": false,
+    "probe_interval_minutes": 5
+  },
   "model_fallback": {},
   "upstream": {
     "zen": "https://opencode.ai/zen",
@@ -19,7 +23,8 @@
   },
   "retry": {
     "max_attempts": 3,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "sleep_on_rotation": false
   },
   "models": {
     "refresh_seconds": 300,

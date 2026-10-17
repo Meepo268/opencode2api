@@ -29,6 +29,12 @@ type proxyTransport struct {
 	client   *http.Client
 	healthy  atomic.Bool
 	checking atomic.Bool
+	// probeFails counts consecutive scheduled-probe failures and drives the
+	// backoff in nextProbeAt. Real traffic success clears both.
+	probeFails atomic.Uint32
+	// nextProbeAt is the earliest unix-nano time a scheduled probe may test
+	// this proxy again. Zero means a probe is due.
+	nextProbeAt atomic.Int64
 }
 
 type transportPool struct {
@@ -320,11 +326,52 @@ type proxyHealthResult struct {
 	wasHealthy bool
 }
 
+// carryProxyHealth preserves per-proxy health across transport pool rebuilds
+// (configuration apply), so saving settings does not resurrect a dead proxy.
+// Matching is by proxy URL; newly added URLs start healthy as before, and
+// removed URLs are simply forgotten. Only unhealthy state and probe backoff
+// are carried: success counters stay local to each pool generation.
+func carryProxyHealth(prev, next *transportPool) int {
+	if prev == nil || next == nil {
+		return 0
+	}
+	byName := make(map[string]*proxyTransport, len(prev.items))
+	for _, proxy := range prev.items {
+		if proxy != nil {
+			byName[proxy.name] = proxy
+		}
+	}
+	carried := 0
+	for _, proxy := range next.items {
+		if proxy == nil {
+			continue
+		}
+		old, ok := byName[proxy.name]
+		if !ok {
+			continue
+		}
+		if !old.healthy.Load() {
+			proxy.healthy.Store(false)
+			carried++
+		}
+		if at := old.nextProbeAt.Load(); at != 0 {
+			proxy.nextProbeAt.Store(at)
+		}
+		if fails := old.probeFails.Load(); fails != 0 {
+			proxy.probeFails.Store(fails)
+		}
+	}
+	return carried
+}
+
 // CheckHealth concurrently rechecks only proxies already marked unhealthy.
 // Healthy proxies are skipped before a check is claimed. Any HTTP response
 // from the test URL proves that the route is reachable; only a timeout or
 // connection refusal keeps the proxy unhealthy.
-func (p *transportPool) CheckHealth(ctx context.Context, target string, timeout time.Duration) []proxyHealthResult {
+func (p *transportPool) CheckHealth(ctx context.Context, health config.ProxyHealthConfig) []proxyHealthResult {
+	target := health.ProbeURL
+	timeout := time.Duration(health.ProbeTimeoutSeconds) * time.Second
+	now := time.Now().UnixNano()
 	results := make(chan proxyHealthResult, len(p.items))
 	checks := 0
 	for _, proxy := range p.items {
@@ -337,9 +384,15 @@ func (p *transportPool) CheckHealth(ctx context.Context, target string, timeout 
 			proxy.checking.Store(false)
 			continue
 		}
+		// Backoff, not abandonment: a proxy that keeps failing is probed
+		// rarely instead of never, so a long outage cannot condemn it forever.
+		if at := proxy.nextProbeAt.Load(); at > now {
+			proxy.checking.Store(false)
+			continue
+		}
 		checks++
 		go func() {
-			results <- p.checkClaimedProxy(ctx, proxy, target, timeout)
+			results <- p.checkClaimedProxy(ctx, proxy, target, timeout, health)
 		}()
 	}
 	out := make([]proxyHealthResult, 0, checks)
@@ -350,7 +403,10 @@ func (p *transportPool) CheckHealth(ctx context.Context, target string, timeout 
 }
 
 // checkClaimedProxy performs a check after the caller has acquired checking.
-func (p *transportPool) checkClaimedProxy(ctx context.Context, proxy *proxyTransport, target string, timeout time.Duration) proxyHealthResult {
+// A passing probe fully rehabilitates the proxy; a failing one pushes the
+// next scheduled probe out with exponential backoff (capped), so a dead
+// proxy is rechecked rarely instead of hammered — or forgotten.
+func (p *transportPool) checkClaimedProxy(ctx context.Context, proxy *proxyTransport, target string, timeout time.Duration, health config.ProxyHealthConfig) proxyHealthResult {
 	defer proxy.checking.Store(false)
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -367,9 +423,25 @@ func (p *transportPool) checkClaimedProxy(ctx context.Context, proxy *proxyTrans
 	result := proxyHealthResult{proxy: proxy, err: err, wasHealthy: proxy.healthy.Load()}
 	if err == nil {
 		result.wasHealthy = proxy.healthy.Swap(true)
+		proxy.probeFails.Store(0)
+		proxy.nextProbeAt.Store(0)
 	} else if isProxyFailure(err) {
 		result.failed = true
 		result.wasHealthy = proxy.healthy.Swap(false)
+		interval := time.Duration(health.ProbeIntervalMinutes) * time.Minute
+		maxBackoff := time.Duration(health.MaxProbeBackoffMinutes) * time.Minute
+		backoff := interval
+		for i := proxy.probeFails.Load(); i > 0 && backoff < maxBackoff; i-- {
+			backoff *= 2
+		}
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		if backoff < interval {
+			backoff = interval
+		}
+		proxy.probeFails.Add(1)
+		proxy.nextProbeAt.Store(time.Now().Add(backoff).UnixNano())
 	}
 	return result
 }

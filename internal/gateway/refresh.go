@@ -11,12 +11,6 @@ import (
 	modelcatalog "opencode2api/internal/models"
 )
 
-const (
-	proxyHealthCheckURL      = "https://cloudflare.com/cdn-cgi/trace"
-	proxyHealthCheckInterval = 15 * time.Minute
-	proxyHealthCheckTimeout  = 10 * time.Second
-)
-
 // syncProxyResult updates proxy health from real traffic. Only timeouts and
 // connection refusals mark a proxy unavailable. Any HTTP response — including
 // 4xx/5xx — proves the route is reachable and restores a proxy evicted by an
@@ -56,6 +50,9 @@ func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, st
 }
 
 func (g *Gateway) verifyProxyAfterError(ctx context.Context, proxy *proxyTransport, status int) {
+	if g.cfg.ProxyHealth.Disabled {
+		return
+	}
 	if !proxy.checking.CompareAndSwap(false, true) {
 		return
 	}
@@ -63,7 +60,8 @@ func (g *Gateway) verifyProxyAfterError(ctx context.Context, proxy *proxyTranspo
 	// running. Keep its values but give the proxy check an independent timeout.
 	checkCtx := context.WithoutCancel(ctx)
 	go func() {
-		result := g.transports.checkClaimedProxy(checkCtx, proxy, proxyHealthCheckURL, proxyHealthCheckTimeout)
+		health := g.cfg.ProxyHealth
+		result := g.transports.checkClaimedProxy(checkCtx, proxy, health.ProbeURL, time.Duration(health.ProbeTimeoutSeconds)*time.Second, health)
 		g.applyProxyHealthResult(result, "upstream HTTP response", status)
 	}()
 }
@@ -101,14 +99,18 @@ func (g *Gateway) restoreProxy(proxy *proxyTransport) (zenMoved, goMoved int) {
 }
 
 func (g *Gateway) StartProxyHealthChecks(ctx context.Context) {
+	if g.cfg.ProxyHealth.Disabled {
+		g.logger.Info("proxy health probing disabled by operator", "component", "proxy", "event", "proxy_health_disabled")
+		return
+	}
 	check := func() {
-		results := g.transports.CheckHealth(ctx, proxyHealthCheckURL, proxyHealthCheckTimeout)
+		results := g.transports.CheckHealth(ctx, g.cfg.ProxyHealth)
 		for _, result := range results {
 			g.applyProxyHealthResult(result, "scheduled health check", 0)
 		}
 	}
 	go func() {
-		ticker := time.NewTicker(proxyHealthCheckInterval)
+		ticker := time.NewTicker(time.Duration(g.cfg.ProxyHealth.ProbeIntervalMinutes) * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
