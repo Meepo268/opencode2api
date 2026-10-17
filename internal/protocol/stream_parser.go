@@ -206,7 +206,9 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 	case "response.reasoning_summary_text.delta":
 		key := responseToolKey(value, nil)
 		parser.responseReasoning[key] = true
-		return []bridgeStreamEvent{{Kind: "reasoning", Text: jsonutil.StringAt(value, "delta")}}
+		// item_id is the upstream-signed reasoning id; carry it so the
+		// emitter can echo it instead of inventing one (see startReasoning).
+		return []bridgeStreamEvent{{Kind: "reasoning", ID: jsonutil.StringAt(value, "item_id"), Text: jsonutil.StringAt(value, "delta")}}
 	case "response.output_item.added":
 		item := jsonutil.MapAt(value, "item")
 		if jsonutil.StringAt(item, "type") == "function_call" {
@@ -236,7 +238,11 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 			}
 			blocks := decodeResponsesReasoning(item)
 			if len(blocks) > 0 {
-				return []bridgeStreamEvent{{Kind: "reasoning", Text: blocks[0].Text, Encrypted: blocks[0].Encrypted}}
+				// The id must survive: the upstream signed it and the client
+				// replays it on the next turn. Dropping it made the emitter
+				// invent a fresh id the upstream never issued, which the
+				// following request answered with "reasoning item not found".
+				return []bridgeStreamEvent{{Kind: "reasoning", ID: blocks[0].ID, Text: blocks[0].Text, Encrypted: blocks[0].Encrypted}}
 			}
 			return nil
 		}

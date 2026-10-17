@@ -170,12 +170,26 @@ func decodeResponsesReasoning(item map[string]any) []bridgeBlock {
 	}}
 }
 
+// gatewayReasoningIDPrefix marks a reasoning item id the gateway invented
+// because the upstream protocol has no server-issued id (Chat or Anthropic).
+// Such an id is meaningless upstream: replaying it can only be answered with
+// "referenced reasoning item not found", so it is stripped on the way back
+// out. Real upstream ids start with "rs_" and are preserved verbatim.
+const gatewayReasoningIDPrefix = "rs_gw_"
+
 // encodeResponsesReasoningInput renders a reasoning block for a Responses
 // request body. It reports false for blocks that carry neither a server-issued
 // id nor encrypted content: those came from a protocol whose wire format has no
 // reasoning reference (Chat text or Anthropic thinking), so replaying them
 // under a synthesized id can only be rejected as a stale reference.
+//
+// It also reports false for gateway-minted ids (rs_gw_): the upstream never
+// issued them, so forwarding one would manufacture the exact stale-reference
+// rejection this avoids.
 func encodeResponsesReasoningInput(block bridgeBlock) (map[string]any, bool) {
+	if strings.HasPrefix(block.ID, gatewayReasoningIDPrefix) {
+		return nil, false
+	}
 	if block.ID == "" && block.Encrypted == "" {
 		return nil, false
 	}
@@ -185,7 +199,7 @@ func encodeResponsesReasoningInput(block bridgeBlock) (map[string]any, bool) {
 func encodeResponsesReasoning(block bridgeBlock, completed bool) map[string]any {
 	id := block.ID
 	if id == "" {
-		id = identity.RandomID("rs", 12)
+		id = gatewayReasoningIDPrefix + identity.RandomID("", 12)
 	}
 	summary := []any{}
 	if block.Text != "" {

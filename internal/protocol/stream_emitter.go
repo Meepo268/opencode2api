@@ -50,13 +50,18 @@ type bridgeStreamEmitter struct {
 	reasoningOpen   bool
 	reasoningClosed bool
 	reasoningItemID string
-	reasoningOutput int
-	reasoningIndex  int
-	textIndex       int
-	nextAnthropic   int
-	textItemID      string
-	textOutput      int
-	responseOutput  []any
+	// reasoningUpstreamID is the id the upstream signed. It is reused when
+	// present so the client can replay a reference the server recognizes;
+	// only a stream without one (Chat or Anthropic upstream) gets a
+	// gateway-minted id.
+	reasoningUpstreamID string
+	reasoningOutput     int
+	reasoningIndex      int
+	textIndex           int
+	nextAnthropic       int
+	textItemID          string
+	textOutput          int
+	responseOutput      []any
 }
 
 func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string) *bridgeStreamEmitter {
@@ -84,6 +89,9 @@ func (emitter *bridgeStreamEmitter) Emit(event bridgeStreamEvent) error {
 	}
 	switch event.Kind {
 	case "reasoning":
+		if event.ID != "" && emitter.reasoningUpstreamID == "" {
+			emitter.reasoningUpstreamID = event.ID
+		}
 		if event.Encrypted != "" {
 			emitter.reasoningEncrypted = event.Encrypted
 			if emitter.target != Responses && event.Text == "" {
@@ -356,7 +364,14 @@ func (emitter *bridgeStreamEmitter) startReasoning() error {
 			"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
 		})
 	case Responses:
-		emitter.reasoningItemID = identity.RandomID("rs", 12)
+		// Reuse the upstream-signed id when the stream carried one; only mint a
+		// gateway-marked id when it did not (Chat/Anthropic upstream), and that
+		// marker keeps the item from ever being replayed upstream.
+		if emitter.reasoningUpstreamID != "" {
+			emitter.reasoningItemID = emitter.reasoningUpstreamID
+		} else {
+			emitter.reasoningItemID = gatewayReasoningIDPrefix + identity.RandomID("", 12)
+		}
 		emitter.reasoningOutput = emitter.nextOutput
 		emitter.nextOutput++
 		item := map[string]any{"id": emitter.reasoningItemID, "type": "reasoning", "status": "in_progress", "summary": []any{}}
