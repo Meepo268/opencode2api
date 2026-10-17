@@ -276,7 +276,7 @@ global pool; `"*"` is an optional default override.
 
 - Values must already exist in the global proxy list (`direct` included);
   typos are rejected on save/startup instead of silently falling back.
-  Values accept raw URLs or proxy fingerprints, so the WebUI checkbox builder
+  Values accept raw URLs or proxy fingerprints, so the WebUI pool builder
   can reference credentialed proxies without pasting passwords.
 - `rotation` aliases (`sota`/`sweet`) are resolved to the real model first,
   then the real model's pool applies.
@@ -477,7 +477,7 @@ Practical tuning for fewer interruptions:
 
 On startup, a bootstrap password is hashed and removed from the configuration. The backup containing that bootstrap plaintext is deleted. Keep configuration files and backups private: upstream keys and proxy credentials remain necessary configuration secrets.
 
-Logs are written to standard output and to an in-memory ring buffer that backs the WebUI log page. Setting `logging.file_path` additionally mirrors the same redacted JSON lines to disk so they can be collected and analysed offline; an empty value disables it. The path may be absolute or relative to the configuration file. The sink opens on start and on every configuration save, so enabling, retargeting or disabling it never needs a restart. A console save that does not carry the field keeps the current path, so the form cannot silently switch file logging off; clearing the path is a configuration-file edit. It rotates to `<path>.1` once the active file passes 32 MB, keeping exactly one backup, and a path that cannot be opened is reported as a warning without affecting request handling.
+Logs are written to standard output and to an in-memory ring buffer that backs the WebUI log page. Setting `logging.file_path` additionally mirrors the same redacted JSON lines to disk so they can be collected and analysed offline; an empty value disables it. The path may be absolute or relative to the configuration file. The sink opens on start and on every configuration save, so enabling, retargeting or disabling it never needs a restart. The console exposes it as a **write logs to a file** checkbox plus a path field: unchecking saves an empty path (an explicit opt-out), while checking it with a blank path falls back to `logs/opencode2api.log`. A configuration save that omits the field keeps the current path, so unrelated saves cannot silently switch file logging off. It rotates to `<path>.1` once the active file passes 32 MB, keeping exactly one backup, and a path that cannot be opened is reported as a warning without affecting request handling.
 
 Body dumps are opt-in and capped at 64 KiB per prepared body. Configured secrets are redacted, but conversation content may still be sensitive.
 

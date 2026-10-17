@@ -169,6 +169,36 @@ async function run(event) {
   }
 }
 
+// Availability rows back the effort column; refetched at most every 30s so
+// keystrokes in the route search box never hammer the probe endpoint.
+let availabilityAt = 0;
+let availabilityModels = [];
+
+async function ensureAvailability() {
+  if (Date.now() - availabilityAt < 30000) return availabilityModels;
+  try {
+    const value = await api("/api/models/availability");
+    availabilityModels = value.models || [];
+    availabilityAt = Date.now();
+  } catch {
+    // 诊断页允许缺探测数据——档位列退化为默认值。
+  }
+  return availabilityModels;
+}
+
+// The thinking level actually applied for a model: a per-model override wins,
+// then the last verified probe result, then the operator default.
+function diagnosticEffort(model) {
+  const reasoning = store.get("config")?.reasoning || {};
+  const pinned = reasoning.effort_by_model?.[model];
+  if (pinned) return pinned;
+  const item = availabilityModels.find((row) => row.model === model);
+  if (item?.auto_effort?.effort) {
+    return `${item.auto_effort.effort} (${t("自动", "diag.auto")})`;
+  }
+  return reasoning.effort || "—";
+}
+
 function renderRequests() {
   const host = $("#upstream-requests");
   host.replaceChildren();
@@ -190,6 +220,8 @@ function renderRequests() {
           el("td", { text: request.model }),
           el("td", { text: request.tier || "—" }),
           el("td", { text: request.channel }),
+          el("td", { text: request.effort || "—" }),
+          el("td", { text: request.stream ? t("流式", "diag.stream") : t("非流式", "diag.nonStream") }),
           el("td", { text: request.key_id || "—" }),
           el("td", { class: "num", text: request.attempts }),
           el("td", { class: request.success ? "ok" : "bad", text: result }),
@@ -197,7 +229,7 @@ function renderRequests() {
         ]),
       );
     });
-  if (!host.children.length) emptyRow(host, 9, t("尚无请求路由", "diag.noRequests"));
+  if (!host.children.length) emptyRow(host, 11, t("尚无请求路由", "diag.noRequests"));
 }
 
 function renderAttempts() {
@@ -213,6 +245,8 @@ function renderAttempts() {
           el("td", { class: "mono", text: attempt.request_id }),
           el("td", { text: attempt.model }),
           el("td", { text: `${attempt.tier} / ${attempt.channel}` }),
+          el("td", { text: attempt.upstream || "—" }),
+          el("td", { text: attempt.effort || "—" }),
           el("td", { text: attempt.key_id }),
           el("td", { text: attempt.proxy_node }),
           el("td", { class: attempt.success ? "ok" : "bad", text: attempt.status || attempt.outcome }),
@@ -220,7 +254,7 @@ function renderAttempts() {
         ]),
       );
     });
-  if (!host.children.length) emptyRow(host, 8, t("尚无上游尝试", "diag.noAttempts"));
+  if (!host.children.length) emptyRow(host, 10, t("尚无上游尝试", "diag.noAttempts"));
 }
 
 function renderMetadata() {
@@ -307,6 +341,7 @@ function renderRouteModels() {
           text: eligibility.allowed ? t("允许", "common.allowed") : t("拒绝", "common.denied"),
         }),
         el("td", { text: eligibility.source || "—" }),
+        el("td", { text: diagnosticEffort(item.model) }),
         el("td", {
           class: "num",
           text: `${eligibility.input_cost == null ? "?" : eligibility.input_cost} / ${
@@ -315,10 +350,9 @@ function renderRouteModels() {
         }),
         el("td", {}, [el("div", { class: "key-actions" }, [hide])]),
       ];
-      const row = el("tr", { class: item.hidden ? "row-hidden" : "" }, cells);
-      host.append(row);
+      host.append(el("tr", { class: item.hidden ? "row-hidden" : "" }, cells));
     });
-  if (!host.children.length) emptyRow(host, 7, t("没有匹配模型", "diag.noMatch"));
+  if (!host.children.length) emptyRow(host, 8, t("没有匹配模型", "diag.noMatch"));
 }
 
 let activeTab = "playground";
@@ -346,7 +380,10 @@ export default {
         renderModels();
       }
       if (id === "ledger") renderLedger();
-      if (id === "route") renderRoute();
+      if (id === "route") {
+        renderRoute();
+        ensureAvailability().then(renderRouteModels);
+      }
     });
     logstream.bind();
     $("#play-protocol").addEventListener("change", resetTemplate);
@@ -390,6 +427,7 @@ export default {
     if (!store.get("debug")) loadDebugModels();
     renderModels();
     renderLedger();
+    if (activeTab === "route") ensureAvailability().then(renderRouteModels);
     renderRoute();
     if (activeTab === "logs") logstream.setVisible(true);
   },
@@ -398,5 +436,11 @@ export default {
   },
   refresh() {
     if (activeTab === "logs") logstream.render();
+    if (activeTab === "route") {
+      availabilityAt = 0;
+      ensureAvailability().then(() => {
+        if (activeTab === "route") renderRouteModels();
+      });
+    }
   },
 };

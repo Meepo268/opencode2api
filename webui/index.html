@@ -338,6 +338,8 @@
                         <th data-i18n="diagnostics.col.model">模型</th>
                         <th data-i18n="diagnostics.col.tier">Tier</th>
                         <th data-i18n="diagnostics.col.channel">通道</th>
+                        <th data-i18n="diagnostics.col.effort">强度</th>
+                        <th data-i18n="diagnostics.col.stream">类型</th>
                         <th data-i18n="diagnostics.col.tail">Key 尾码</th>
                         <th class="num" data-i18n="diagnostics.col.attempts">尝试</th>
                         <th data-i18n="diagnostics.col.state">状态</th>
@@ -363,6 +365,8 @@
                         <th>Request ID</th>
                         <th data-i18n="diagnostics.col.model">模型</th>
                         <th data-i18n="diagnostics.col.channel">通道</th>
+                        <th data-i18n="diagnostics.col.upstream">上游端点</th>
+                        <th data-i18n="diagnostics.col.effort">强度</th>
                         <th data-i18n="diagnostics.col.tail">Key 尾码</th>
                         <th data-i18n="diagnostics.col.proxy">代理节点</th>
                         <th data-i18n="diagnostics.col.state">状态</th>
@@ -435,6 +439,7 @@
                         <th data-i18n="diagnostics.models.col.route">路由</th>
                         <th data-i18n="diagnostics.models.col.eligibility">匿名资格</th>
                         <th data-i18n="diagnostics.models.col.source">判断来源</th>
+                        <th data-i18n="diagnostics.models.col.effort">应用强度</th>
                         <th class="num" data-i18n="diagnostics.models.col.cost">成本 input / output</th>
                         <th data-i18n="diagnostics.models.col.actions">操作</th>
                       </tr>
@@ -810,6 +815,17 @@
                       </label>
                     </div>
                     <div class="field full">
+                      <label class="check">
+                        <input id="c-anonymous-priority" type="checkbox" />
+                        <span data-i18n="config.secrets.anonymousPriority"
+                          >匿名优先：先用匿名通道，失败再换 Key</span
+                        >
+                      </label>
+                      <p class="field-hint" data-i18n="config.secrets.anonymousPriorityHint">
+                        关闭时 Server Key 排在匿名通道之前。
+                      </p>
+                    </div>
+                    <div class="field full">
                       <label for="server_keys-new">Server Keys</label>
                       <div id="server_keys-chips" class="chips"></div>
                       <textarea
@@ -862,6 +878,139 @@
                     </div>
                   </div>
                 </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.proxy.healthTitle">
+                        出口重试与健康探测
+                      </h2>
+                      <p class="section-caption" data-i18n="config.proxy.healthCaption">
+                        出口失败后按次数与间隔重试；健康探测仅针对被标记不健康的出口做轻量回检。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="c-proxy-retry-attempts" data-i18n="config.proxy.retryAttempts">
+                        出口重试次数（0=跟随全局）
+                      </label>
+                      <input id="c-proxy-retry-attempts" type="number" min="0" max="10" />
+                    </div>
+                    <div class="field">
+                      <label for="c-proxy-retry-interval" data-i18n="config.proxy.retryInterval">
+                        出口重试间隔（秒，0=禁用）
+                      </label>
+                      <input id="c-proxy-retry-interval" type="number" min="0" max="60" />
+                    </div>
+                    <div class="field">
+                      <label for="c-ph-interval" data-i18n="config.proxy.healthInterval">
+                        探测间隔（分钟）
+                      </label>
+                      <input id="c-ph-interval" type="number" min="0" max="1440" />
+                    </div>
+                    <div class="field">
+                      <label for="c-ph-timeout" data-i18n="config.proxy.healthTimeout">
+                        探测超时（秒）
+                      </label>
+                      <input id="c-ph-timeout" type="number" min="0" max="120" />
+                    </div>
+                    <div class="field">
+                      <label for="c-ph-backoff" data-i18n="config.proxy.healthBackoff">
+                        探测退避上限（分钟）
+                      </label>
+                      <input id="c-ph-backoff" type="number" min="0" max="1440" />
+                    </div>
+                    <div class="field">
+                      <label for="c-ph-url" data-i18n="config.proxy.healthUrl">探测 URL</label>
+                      <input id="c-ph-url" placeholder="https://…（留空=默认探测端点）" />
+                    </div>
+                    <div class="field full">
+                      <label class="check">
+                        <input id="c-ph-disabled" type="checkbox" />
+                        <span data-i18n="config.proxy.healthDisabled">
+                          禁用出口健康探测（不再自动回检）
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.proxy.byModelTitle">
+                        模型 → Proxy 定向
+                      </h2>
+                      <p class="section-caption" data-i18n="config.proxy.byModelCaption">
+                        命中的模型强制绑定列出的出口；列表为空时按默认策略放行。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label for="c-proxy-by-model" data-i18n="config.proxy.byModel">
+                        按模型绑定（JSON）
+                      </label>
+                      <textarea
+                        id="c-proxy-by-model"
+                        spellcheck="false"
+                        placeholder='{"gpt-5":["direct"]}'
+                      ></textarea>
+                      <p class="section-caption" data-i18n="config.proxy.byModelNote">
+                        构建器会直接改写这段 JSON；出口名称须与上面已配置的 Proxy 一致。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="pbm-grid">
+                    <div class="field">
+                      <label for="pbm-new-model" data-i18n="config.proxy.pbmModel">模型</label>
+                      <select id="pbm-new-model">
+                        <option value="" data-i18n="config.proxy.pbmAnyModel">
+                          （任意模型）
+                        </option>
+                      </select>
+                    </div>
+                    <div class="field pbm-add-field">
+                      <span data-i18n="config.proxy.pbmPick">
+                        点选出口（可多选）
+                      </span>
+                      <button
+                        id="pbm-chips-clear"
+                        type="button"
+                        class="btn btn-sm btn-ghost"
+                        data-i18n="config.proxy.pbmReset"
+                      >
+                        清空重选
+                      </button>
+                      <div id="pbm-new-chips" class="chip-strip"></div>
+                      <p
+                        class="section-caption"
+                        data-i18n="config.proxy.pbmPickNote"
+                      >
+                        出口列表来自上面已配置的 Proxy（含 proxy 文件导入）；点选顺序即绑定顺序，先点的排在前面。
+                      </p>
+                    </div>
+                    <button
+                      id="pbm-add"
+                      type="button"
+                      class="btn"
+                      data-i18n="config.proxy.pbmAdd"
+                    >
+                      添加绑定
+                    </button>
+                  </div>
+                  <div class="table-wrap">
+                    <table class="table mono">
+                      <thead>
+                        <tr>
+                          <th data-i18n="config.proxy.pbmCol.model">模型</th>
+                          <th data-i18n="config.proxy.pbmCol.exits">出口</th>
+                          <th data-i18n="config.proxy.pbmCol.action">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="pbm-rows"></tbody>
+                    </table>
+                  </div>
+                </section>
               </div>
 
               <div data-panel="upstream" class="stack hidden" role="tabpanel">
@@ -891,6 +1040,15 @@
                       <input id="c-up-go" />
                     </div>
                     <div class="field">
+                      <label for="c-up-anon" data-i18n="config.upstream.anonymous"
+                        >匿名上游 URL</label
+                      >
+                      <input id="c-up-anon" placeholder="https://opencode.ai/inference" />
+                      <p class="field-hint" data-i18n="config.upstream.anonymousHint">
+                        无 Key 的免费模型通道；留空回落到默认地址。
+                      </p>
+                    </div>
+                    <div class="field">
                       <label for="c-attempts" data-i18n="config.upstream.attempts">每个 Key Tier 最大尝试次数</label>
                       <input id="c-attempts" type="number" />
                     </div>
@@ -913,6 +1071,74 @@
                           仅暴露免费模型（即使配置了 Zen / Go Key）
                         </span>
                       </label>
+                    </div>
+                  </div>
+                </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.fallback.title">模型回退</h2>
+                      <p class="section-caption" data-i18n="config.fallback.caption">
+                        主模型失败时改走指定的回退模型（单跳）；回退仍失败会返回最初的报错。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label for="c-model-fallback" data-i18n="config.fallback.config">
+                        回退配置（JSON）
+                      </label>
+                      <textarea
+                        id="c-model-fallback"
+                        spellcheck="false"
+                        placeholder='{"gpt-5":"gpt-5-codex"}'
+                      ></textarea>
+                      <p class="section-caption" data-i18n="config.fallback.note">
+                        键为主模型，值为单个回退模型（禁止自指与循环）；构建器会直接改写这段 JSON。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="trio-grid">
+                    <div class="field">
+                      <label for="fb-new-from" data-i18n="config.fallback.from">主模型</label>
+                      <select id="fb-new-from"></select>
+                    </div>
+                    <div class="field">
+                      <label for="fb-new-to" data-i18n="config.fallback.to">回退模型</label>
+                      <select id="fb-new-to"></select>
+                    </div>
+                    <button id="fb-add" type="button" class="btn" data-i18n="config.fallback.add">
+                      添加回退
+                    </button>
+                  </div>
+                  <div class="table-wrap">
+                    <table class="table mono">
+                      <thead>
+                        <tr>
+                          <th data-i18n="config.fallback.col.from">主模型</th>
+                          <th data-i18n="config.fallback.col.to">回退模型</th>
+                          <th data-i18n="config.fallback.col.action">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="fb-rows"></tbody>
+                    </table>
+                  </div>
+                  <div class="section-head">
+                    <div>
+                      <p class="section-caption" data-i18n="config.refusal.caption">
+                        拒绝改写：上游返回内容拒绝时，用同一通道把拒绝原因回灌给模型，最多重试指定轮数。
+                      </p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="c-refusal-rounds" data-i18n="config.refusal.rounds">
+                        拒绝改写轮数
+                      </label>
+                      <input id="c-refusal-rounds" type="number" min="0" max="10" />
+                      <p class="field-hint" data-i18n="config.refusal.note">
+                        0 表示关闭；每一轮都会重新计费。
+                      </p>
                     </div>
                   </div>
                 </section>
@@ -944,6 +1170,25 @@
                         <option value="none" data-i18n="config.reasoning.none">关闭</option>
                       </select>
                     </div>
+                    <div class="field">
+                      <label for="c-reasoning-precedence" data-i18n="config.reasoning.precedence">
+                        覆盖优先级
+                      </label>
+                      <select id="c-reasoning-precedence">
+                        <option
+                          value="client_first"
+                          data-i18n="config.reasoning.precedence.client"
+                        >
+                          客户端指定 ＞ 按模型覆盖 ＞ 默认强度
+                        </option>
+                        <option
+                          value="by_model_first"
+                          data-i18n="config.reasoning.precedence.byModel"
+                        >
+                          按模型覆盖 ＞ 客户端指定 ＞ 默认强度
+                        </option>
+                      </select>
+                    </div>
                     <div class="field full">
                       <label for="c-reasoning-by-model" data-i18n="config.reasoning.byModel">
                         按模型覆盖（JSON）
@@ -957,6 +1202,39 @@
                         值可为 minimal、low、medium、high、xhigh、max 或 none；空对象表示不覆盖。
                       </p>
                     </div>
+                  </div>
+                </section>
+                <section class="section">
+                  <div class="section-head">
+                    <div>
+                      <h2 class="section-title" data-i18n="config.reasoning.auto.title">
+                        匿名探测思考档位
+                      </h2>
+                      <p class="section-caption" data-i18n="config.reasoning.auto.caption">
+                        最近一次匿名探测结果；点击"写入覆盖"会填入上方按模型覆盖 JSON。
+                      </p>
+                    </div>
+                    <button
+                      id="effort-refresh"
+                      type="button"
+                      class="btn btn-sm"
+                      data-i18n="config.reasoning.auto.refresh"
+                    >
+                      刷新结果
+                    </button>
+                  </div>
+                  <div class="table-wrap">
+                    <table class="table mono">
+                      <thead>
+                        <tr>
+                          <th data-i18n="config.reasoning.auto.col.model">模型</th>
+                          <th data-i18n="config.reasoning.auto.col.effort">档位</th>
+                          <th data-i18n="config.reasoning.auto.col.status">状态</th>
+                          <th data-i18n="config.reasoning.auto.col.action">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody id="effort-auto-rows"></tbody>
+                    </table>
                   </div>
                 </section>
                 <section class="section">
@@ -1041,6 +1319,29 @@
                           转储出站请求体（已脱敏，仅用于排查重试与转换问题）
                         </span>
                       </label>
+                    </div>
+                    <div class="field full">
+                      <label class="check">
+                        <input id="c-log-file" type="checkbox" />
+                        <span data-i18n="config.logging.file">
+                          保存日志到文件（自动创建 log 文件夹并持续写入 JSON 日志）
+                        </span>
+                      </label>
+                    </div>
+                    <div class="field full">
+                      <label
+                        for="c-log-file-path"
+                        data-i18n="config.logging.filePath"
+                      >
+                        日志文件路径（留空使用默认）
+                      </label>
+                      <input id="c-log-file-path" placeholder="logs/opencode2api.log" />
+                      <p
+                        class="section-caption"
+                        data-i18n="config.logging.filePathNote"
+                      >
+                        相对路径相对 config.json 所在目录；文件夹不存在会自动创建；取消勾选即停止写文件；开启“转储请求体”后文件会包含对话内容。
+                      </p>
                     </div>
                   </div>
                 </section>
