@@ -52,6 +52,14 @@ type RequestMeta struct {
 	// Effort is the thinking level actually applied to the upstream request
 	// for the serving tier ("": client-specified or untouched).
 	Effort string
+	// LaneSwitched marks a request that was served by a lane other than the
+	// one its session was pinned to (anonymous_priority=false), including the
+	// deferred fallback back to the anonymous lane. PinnedLane records what
+	// the session was pinned to: "anonymous", "key" or "" (no live pin).
+	// Both exist so stale-reasoning retries can be correlated with lane
+	// changes instead of guessed at.
+	LaneSwitched bool
+	PinnedLane   string
 }
 
 // PlaygroundServerKey buckets admin Playground traffic, which authenticates
@@ -135,6 +143,7 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
 					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "server_key_id", meta.ServerKeyID, "tier", meta.Tier, "key_id", meta.KeyID,
 					"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
+					"pinned_lane", meta.PinnedLane, "lane_switched", meta.LaneSwitched,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)
 			}
 			logger.Debug("request completed", "component", "http", "event", "request_complete", "method", r.Method,

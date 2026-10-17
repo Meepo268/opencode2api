@@ -24,12 +24,19 @@ type Config struct {
 	ZenKeys           []string                     `json:"zen_keys"`
 	GoKeys            []string                     `json:"go_keys"`
 	Anonymous         bool                         `json:"anonymous"`
-	Proxies           []string                     `json:"proxies"`
-	ProxyFile         string                       `json:"proxyfile"`
-	ProxyByModel      map[string][]string          `json:"proxy_by_model,omitempty"`
-	ProxyRetry        ProxyRetryConfig             `json:"proxy_retry,omitempty"`
-	ProxyHealth       ProxyHealthConfig            `json:"proxy_health,omitempty"`
-	ModelFallback     map[string]string            `json:"model_fallback,omitempty"`
+	// AnonymousPriority keeps the historical "try the anonymous lane first"
+	// order for every request. Disabling it pins each session to whichever
+	// lane last served it, trading free-tier usage for predictable affinity.
+	//
+	// The zero value is false, so Load seeds true before decoding: omitting
+	// the field must never silently opt an existing deployment into pinning.
+	AnonymousPriority bool                `json:"anonymous_priority"`
+	Proxies           []string            `json:"proxies"`
+	ProxyFile         string              `json:"proxyfile"`
+	ProxyByModel      map[string][]string `json:"proxy_by_model,omitempty"`
+	ProxyRetry        ProxyRetryConfig    `json:"proxy_retry,omitempty"`
+	ProxyHealth       ProxyHealthConfig   `json:"proxy_health,omitempty"`
+	ModelFallback     map[string]string   `json:"model_fallback,omitempty"`
 	// ContentRefusal steers sessions away from a model that refuses on
 	// content-policy grounds. Rounds counts successful fallback rounds
 	// before the primary is probed again; 0 disables the detour.
@@ -224,6 +231,9 @@ func Load(path string) (Config, error) {
 		Logging:        LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:          WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
 		Prefer:         TierGo,
+		// Seeded before decoding: an absent field keeps the historical
+		// anonymous-first order, an explicit false opts into session pinning.
+		AnonymousPriority: true,
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()

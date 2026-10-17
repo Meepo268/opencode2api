@@ -229,13 +229,57 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		resp, err, used := g.doSelectedKeyUpstream(ctx, route, bodies, ids, override, attemptOffset)
 		return resp, route, used, err
 	}
-	if route.Anonymous {
+	// Session-pinned routing (anonymous_priority=false): once a session has
+	// found a working lane, send it straight back there instead of re-probing
+	// the free tier on every turn. Only models that actually have both lanes
+	// are pinned, and a pinned lane that fails still falls back to the other,
+	// so a transient key limit can never strand a conversation.
+	pinning := !g.cfg.AnonymousPriority && g.lanes != nil && route.Anonymous
+	pinnedLane := "" // "", "anonymous" or "key"
+	deferAnonymous := false
+	if pinning {
+		if anonymous, ok := g.lanes.get(ids.Session); ok {
+			pinnedLane, deferAnonymous = "key", true
+			if anonymous {
+				pinnedLane, deferAnonymous = "anonymous", false
+			}
+			if meta := telemetry.MetaFromContext(ctx); meta != nil {
+				meta.PinnedLane = pinnedLane
+			}
+		}
+	}
+	pin := func(anonymous bool) {
+		if pinning {
+			g.lanes.set(ids.Session, anonymous)
+		}
+	}
+	// markSwitched records that the serving lane differs from the pinned one,
+	// which is the signal that a conversation is drifting between lanes.
+	markSwitched := func(served string) {
+		if meta := telemetry.MetaFromContext(ctx); meta != nil && pinnedLane != "" && pinnedLane != served {
+			meta.LaneSwitched = true
+		}
+	}
+
+	var anonResp *http.Response
+	runAnonymous := func() bool {
 		resp, err, used := g.doAnonymousUpstream(ctx, route, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
-			return resp, route, attempts, nil
+			pin(true)
+			markSwitched("anonymous")
+			anonResp = resp
+			return true
 		}
 		lastResponse, lastErr = resp, err
+		effectiveRoute = route
+		return false
+	}
+
+	if route.Anonymous && !deferAnonymous {
+		if runAnonymous() {
+			return anonResp, route, attempts, nil
+		}
 		if len(route.KeyTiers) > 0 {
 			g.logger.Debug("anonymous request did not succeed; entering preferred key tiers", "component", "upstream", "event", "anonymous_fallback", "request_id", ids.Request, "attempts", attempts, "key_tiers", route.KeyTiers)
 		}
@@ -257,6 +301,7 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	if !route.Anonymous && len(keyTiers) == 0 && (route.Tier == config.TierZen || route.Tier == config.TierGo) {
 		keyTiers = []config.Tier{route.Tier}
 	}
+	keyPhaseFailed := false
 	for _, tier := range keyTiers {
 		keyRoute := route
 		keyRoute.Tier = tier
@@ -266,6 +311,8 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		resp, err, used := g.doKeyUpstream(ctx, keyRoute, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
+			pin(false)
+			markSwitched("key")
 			if lastResponse != nil {
 				httpx.DrainAndClose(lastResponse.Body)
 			}
@@ -280,7 +327,23 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		if err != nil {
 			lastErr = err
 		}
+		keyPhaseFailed = true
 	}
+
+	// A session pinned away from the anonymous lane still gets that lane as a
+	// fallback once every key failed; otherwise a temporary key-side limit
+	// would fail the turn even though the free tier is reachable.
+	if deferAnonymous && keyPhaseFailed && ctx.Err() == nil {
+		if lastResponse != nil {
+			httpx.DrainAndClose(lastResponse.Body)
+			lastResponse = nil
+		}
+		g.logger.Debug("pinned key lane failed; falling back to the anonymous lane", "component", "upstream", "event", "anonymous_deferred_fallback", "request_id", ids.Request, "attempts", attempts)
+		if runAnonymous() {
+			return anonResp, route, attempts, nil
+		}
+	}
+
 	if lastResponse != nil {
 		return lastResponse, effectiveRoute, attempts, nil
 	}
@@ -415,6 +478,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		proxies++
 		var nodeResp *http.Response
 		var nodeErr error
+		var nodeDuration time.Duration
 		for index, baseURL := range upstreams {
 			if ctx.Err() != nil {
 				if lastErr == nil && lastResponse == nil {
@@ -454,6 +518,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				break
 			}
 			nodeResp, nodeErr = resp, err
+			nodeDuration = duration
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration, wire.BodyEffort(route.Protocol, preparedBodies[index]))
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
@@ -485,6 +550,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			// the session's exit affinity. A genuinely dead exit fails the
 			// sticky fast and is then skipped by tried/recovery above.
 			sticky = node
+		}
+		// A deterministic request-shape rejection cannot be fixed by a
+		// different exit: the bytes are identical, only the IP changes. The
+		// key tier already stops on these (isNonRetryableClientResponse);
+		// doing the same here is what keeps one bad 400 from burning every
+		// proxy in the pool. Authentication (401/403) and rate limits (429)
+		// are excluded by that helper and keep rotating below.
+		if nodeResp != nil && isNonRetryableClientResponse(nodeResp, nodeErr) {
+			g.logger.Debug("anonymous upstream rejected a non-retryable request", "component", "upstream", "event", "anonymous_attempt_rejected", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "channel", "anonymous", "status", nodeResp.StatusCode, "proxy", config.RedactURL(node.proxy.name), "duration_ms", nodeDuration.Milliseconds())
+			return nodeResp, nil, attempts
 		}
 	}
 	if lastResponse != nil {
