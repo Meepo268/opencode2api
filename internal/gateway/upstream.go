@@ -1109,11 +1109,13 @@ func (g *Gateway) doKeyUpstreamAllowed(ctx context.Context, route models.Route, 
 	if len(body) == 0 {
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
 	}
-	if shaped, changed := g.shapeKeyBody(body, route, route.Tier); changed {
+	shaped, alias, changed := g.shapeKeyBody(body, route, route.Tier)
+	if changed {
 		body = shaped
-		if meta := telemetry.MetaFromContext(ctx); meta != nil {
-			meta.Shaped = true
-		}
+	}
+	if meta := telemetry.MetaFromContext(ctx); meta != nil {
+		meta.Shaped = changed
+		meta.ToolAlias = alias
 	}
 	for attempts < maxAttempts {
 		if ctx.Err() != nil {
