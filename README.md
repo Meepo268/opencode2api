@@ -305,6 +305,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
+| `reasoning.precedence`      | `client_first` (default); `by_model_first` lets an override win.            |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |
 
 ### Forced thinking level
@@ -320,14 +321,20 @@ surfaces, so a forced level reaches a rung that the budget alone cannot express.
 {
   "reasoning": {
     "effort": "high",
+    "precedence": "client_first",
     "effort_by_model": { "claude-opus-5": "max" }
   }
 }
 ```
 
-A level a client states explicitly always wins, so this only replaces a level
-nobody asked for: an absent one, or one derived from `thinking.budget_tokens`.
-Use `"none"` to remove reasoning from requests that do not ask for it.
+`reasoning.precedence` decides what wins when a client states a level and a
+per-model override also applies. The default, `client_first`, keeps the
+client's level and uses the override for every other request, including one
+whose level was derived from `thinking.budget_tokens`. Set `by_model_first` to
+let the override replace a level the client stated as well; clients outside the
+override map, and requests the map does not name, are unaffected. Either way the
+default `reasoning.effort` only fills a level nobody asked for. Use `"none"` to
+remove reasoning from requests that do not ask for it.
 
 Levels are reported faithfully in both directions. An explicit
 `output_config.effort` survives conversion instead of being shadowed by a
@@ -335,10 +342,10 @@ Levels are reported faithfully in both directions. An explicit
 `xhigh`, so the two stay distinguishable), and the Responses target carries the
 level as `reasoning.effort` rather than dropping it.
 
-The WebUI Configuration Center exposes the same default and per-model fields.
-The management API returns them as `reasoning` from `GET /api/config` and accepts
-the object in `PUT /api/config`; clients that omit the field keep the existing
-value, while sending an empty object clears it.
+The WebUI Configuration Center exposes the same default, precedence, and
+per-model fields. The management API returns them as `reasoning` from
+`GET /api/config` and accepts the object in `PUT /api/config`; clients that
+omit the field keep the existing value, while sending an empty object clears it.
 
 Proxy entries accept `direct`, `http://`, `https://`, `socks5://`, and `socks5h://`, including URL credentials. The inline list is merged with `proxyfile` and deduplicated in order.
 
@@ -515,7 +522,7 @@ Keys, proxies, upstream URLs, retry settings, model settings, logging, and routi
 
 Request outcomes describe the completed inference. A failed SSE response or truncated stream counts as an error even when HTTP 200 was already sent; its outcome is `stream_error`. Client cancellations are recorded as `client_canceled`. The WebUI displays those outcomes alongside the HTTP status.
 
-Upstream **attempt** records measure the HTTP exchange through receipt of response headers. Their success and latency are separate from completion of the full JSON body or stream.
+Upstream **attempt** records measure the HTTP exchange through receipt of response headers. Their success and latency are separate from completion of the full JSON body or stream. Both request and attempt records carry the thinking effort actually applied to them as `effort`, so a workload that mixes client levels, per-model overrides, and the default stays legible per row.
 
 Token statistics use reported usage only. Input tokens include cache reads and writes; cached tokens separately count cache reads. Missing usage is not estimated, and coverage shows how many routed inference requests reported usage. `usage.server_keys` splits requests and tokens by the local server key the caller authenticated with (its fingerprint, as shown in `/api/api-keys`); Playground traffic is counted under `playground`.
 

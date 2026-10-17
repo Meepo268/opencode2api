@@ -52,6 +52,7 @@
   "prefer": "go",
   "reasoning": {
     "effort": "high",
+    "precedence": "client_first",
     "effort_by_model": {}
   },
   "rotation": {

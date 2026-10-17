@@ -268,6 +268,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
+| `reasoning.precedence`      | `client_first`（默认）或 `by_model_first`（按模型覆盖优先）。                          |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |
 
 ### 强制思考强度
@@ -281,22 +282,26 @@ Responses 近似表达，而强制指定的强度可以到达单独靠预算表�
 {
   "reasoning": {
     "effort": "high",
+    "precedence": "client_first",
     "effort_by_model": { "claude-opus-5": "max" }
   }
 }
 ```
 
-客户端显式指定的强度始终优先，因此它只替换无人指定的强度：完全未设置，
-或由 `thinking.budget_tokens` 推断出来的强度。设为 `"none"` 可为未请求思考的
-请求移除思考配置。
+`reasoning.precedence` 决定客户端与按模型覆盖同时给出强度时谁生效。默认的
+`client_first` 保留客户端强度，覆盖值只用于其余请求（包括仅由
+`thinking.budget_tokens` 推断出的强度）；设为 `by_model_first` 后，覆盖值也会
+替换客户端显式指定的强度，不在覆盖表内的模型和请求不受影响。无论哪种取值，
+默认强度 `reasoning.effort` 都只填补无人指定的强度。设为 `"none"` 可为未请求
+思考的请求移除思考配置。
 
 两个方向的强度都会如实保留：显式的 `output_config.effort` 不会再被 `thinking`
 块遮蔽，`budget_tokens` 保持其档位（`8192` 为 `high`，`32000` 为 `xhigh`，
 两者可区分），发往 Responses 时强度会以 `reasoning.effort` 形式传递而不再丢失。
 
-WebUI 的配置中心也提供默认强度和按模型覆盖。管理 API 的 `GET /api/config`
-会返回 `reasoning`，`PUT /api/config` 接受同名对象；省略该字段会保留现有值，
-发送空对象则会清除它。
+WebUI 的配置中心也提供默认强度、优先级和按模型覆盖。管理 API 的
+`GET /api/config` 会返回 `reasoning`，`PUT /api/config` 接受同名对象；省略该
+字段会保留现有值，发送空对象则会清除它。
 
 代理支持 `direct`、`http://`、`https://`、`socks5://` 和 `socks5h://`，URL 可包含认证信息。配置内代理先加载，再追加 `proxyfile` 内容，并按首次出现的顺序去重。
 
@@ -423,7 +428,7 @@ Key、代理、上游地址、重试、模型、日志和路由偏好立即对�
 
 请求结果以完整推理过程为准。即使 HTTP 200 已经发出，SSE 错误事件或异常断流仍会计为失败，并标记 `stream_error`；客户端取消标记为 `client_canceled`。WebUI 会将这些结果与 HTTP 状态一起显示。
 
-上游**尝试记录**统计的是收到响应头为止的 HTTP 交互，其成功状态和耗时与完整 JSON 响应或流的最终完成情况分开计算。
+上游**尝试记录**统计的是收到响应头为止的 HTTP 交互，其成功状态和耗时与完整 JSON 响应或流的最终完成情况分开计算。请求记录和尝试记录都会用 `effort` 给出发往上游的实际思考强度，因此混合了客户端强度、按模型覆盖和默认值的负载仍可逐行辨认。
 
 Token 统计仅使用上游报告的 usage。输入 Token 包含缓存读取和写入，缓存 Token 单独统计缓存读取量。缺失 usage 时不估算 Token，覆盖率表示已经建立路由的推理请求中有多少报告了 usage。`usage.server_keys` 按调用方认证所用的本地 server key（指纹，与 `/api/api-keys` 的 ID 一致）拆分请求数和 Token；Playground 流量计入 `playground`。
 
@@ -517,7 +522,7 @@ for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check 
 
 ### 自适应思考强度
 
-将 `reasoning.effort` 或按模型覆盖值设置为 `auto`，即可使用免费模型探测实际验证过的最高可用档。已有具体档位语义不变，客户端显式指定的强度始终优先，不维护模型名称白名单。
+将 `reasoning.effort` 或按模型覆盖值设置为 `auto`，即可使用免费模型探测实际验证过的最高可用档。已有具体档位语义不变，默认优先级下客户端显式指定的强度仍然优先（见 `reasoning.precedence`），不维护模型名称白名单。
 
 基础请求成功后，对能力目录标记支持 reasoning 的模型依次验证 `max`、`xhigh`、`high`、`medium`、`low`、`minimal`。只有明确的思考参数不支持错误才尝试下一档；429、超时等临时失败会停止搜索，不能据此判断模型档位上限。全部档位均被拒绝时，不注入思考覆盖。
 

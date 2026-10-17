@@ -31,17 +31,22 @@ const (
 type bridgeStreamEvent struct {
 	Kind       string
 	ResponseID string
-	Model      string
-	Text       string
-	Signature  string
-	ToolKey    string
-	ToolID     string
-	ToolName   string
-	Stop       string
-	Error      string
-	ErrorType  string
-	Encrypted  string
-	Usage      *Usage
+	// ID carries a server-issued identifier that the downstream client will
+	// replay, currently only the Responses reasoning item id. It must survive
+	// parsing and emission verbatim: a client echoing an id the upstream never
+	// minted is answered with "reasoning item not found".
+	ID        string
+	Model     string
+	Text      string
+	Signature string
+	ToolKey   string
+	ToolID    string
+	ToolName  string
+	Stop      string
+	Error     string
+	ErrorType string
+	Encrypted string
+	Usage     *Usage
 }
 
 // TranscodeStream is the request-aware form used by the

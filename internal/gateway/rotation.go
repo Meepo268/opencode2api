@@ -93,7 +93,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 				meta.Tier = "go"
 				meta.Protocol = route.Protocol
 				meta.Attempts = total
-				meta.Effort = g.resolvedEffort(token.Model, config.TierGo, route.Protocol)
+				meta.Effort = g.appliedEffort(external, token.Model, config.TierGo, route.Protocol, payload)
 				meta.Usage = wire.Usage{}
 				meta.UsageReported = false
 			}
@@ -222,7 +222,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	setRequestCredential(parent, config.TierGo, config.KeyDisplayID(node.key), "key", false, proxy)
 	started := time.Now()
 	resp, err := client.Do(req)
-	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started))
+	g.recordUpstreamAttempt(parent, route, ids, attempt, config.KeyDisplayID(node.key), "key", false, proxy, resp, err, time.Since(started), wire.BodyEffort(route.Protocol, body))
 	if resp != nil {
 		defer resp.Body.Close()
 	}

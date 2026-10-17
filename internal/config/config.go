@@ -44,15 +44,17 @@ type Config struct {
 // ReasoningConfig forces a thinking level for requests that do not state one.
 //
 // Effort is the default for every model; EffortByModel overrides it for the
-// model IDs it names. A level a client sends explicitly (Anthropic's
-// output_config.effort / top-level effort, or Chat's reasoning_effort) always
-// wins, so a forced level only replaces a value that would otherwise have been
-// derived from thinking.budget_tokens or left unset.
+// model IDs it names. Precedence decides who wins when both the operator and
+// the client state a level: "" or "client_first" keeps the historical order
+// (a level the client sent explicitly always wins), while "by_model_first"
+// lets a named EffortByModel entry overwrite the client level. The default
+// Effort still yields to the client in both modes.
 type ReasoningConfig struct {
 	// omitempty keeps a saved configuration free of the fields the operator
 	// never set, matching how the rest of the optional surface is persisted.
 	Effort        string            `json:"effort,omitempty"`
 	EffortByModel map[string]string `json:"effort_by_model,omitempty"`
+	Precedence    string            `json:"precedence,omitempty"`
 }
 
 type UpstreamConfig struct {
@@ -313,6 +315,12 @@ func Normalize(path string, cfg Config) (Config, error) {
 // allocating. An empty value means "not forced", which is the default and keeps
 // the feature absent for existing configurations.
 func normalizeReasoning(cfg *Config) error {
+	cfg.Reasoning.Precedence = strings.ToLower(strings.TrimSpace(cfg.Reasoning.Precedence))
+	switch cfg.Reasoning.Precedence {
+	case "", "client_first", "by_model_first":
+	default:
+		return fmt.Errorf("reasoning.precedence must be one of client_first, by_model_first, or empty for client first")
+	}
 	cfg.Reasoning.Effort = strings.ToLower(strings.TrimSpace(cfg.Reasoning.Effort))
 	if err := validateEffort("reasoning.effort", cfg.Reasoning.Effort); err != nil {
 		return err
@@ -360,6 +368,20 @@ func (cfg Config) ForcedEffort(model string) string {
 		return effort
 	}
 	return cfg.Reasoning.Effort
+}
+
+// ByModelFirst reports whether a named per-model level overwrites a level
+// the client stated explicitly.
+func (c ReasoningConfig) ByModelFirst() bool {
+	return c.Precedence == "by_model_first"
+}
+
+// ByModelEffort returns the level named for a model and whether the model is
+// named at all, so callers can tell a per-model override apart from the
+// default when deciding precedence against a client-stated level.
+func (cfg Config) ByModelEffort(model string) (string, bool) {
+	effort, ok := cfg.Reasoning.EffortByModel[model]
+	return effort, ok
 }
 
 // RuntimeProxies returns the resolved proxy list, including proxyfile entries.
