@@ -6,6 +6,12 @@
   "anonymous": false,
   "proxies": ["direct"],
   "proxyfile": "",
+  "proxy_by_model": {},
+  "proxy_retry": {
+    "max_attempts": 0,
+    "interval_seconds": 0
+  },
+  "model_fallback": {},
   "upstream": {
     "zen": "https://opencode.ai/zen",
     "go": "https://opencode.ai/zen/go",
@@ -28,7 +34,7 @@
     "connect_timeout_seconds": 5,
     "failure_cooldown_seconds": 15,
     "attempt_timeout_seconds": 0,
-    "first_event_timeout_seconds": 0
+    "first_event_timeout_seconds": 15
   },
   "logging": {
     "level": "info",
