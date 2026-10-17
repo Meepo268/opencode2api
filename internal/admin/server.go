@@ -218,6 +218,12 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	reasoning := current.Reasoning
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
+		// The WebUI form does not render precedence yet, and a section replace
+		// would silently fall back to client_first. An omitted precedence keeps
+		// the configured one; clearing it means the default anyway.
+		if reasoning.Precedence == "" {
+			reasoning.Precedence = current.Reasoning.Precedence
+		}
 	}
 	proxyByModel := current.ProxyByModel
 	if update.ProxyByModel != nil {
