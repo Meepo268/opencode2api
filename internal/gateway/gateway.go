@@ -360,7 +360,14 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			return
 		}
 		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-		if err != nil {
+		// The extra round is taken on the anonymous lane only. There a
+		// truncated body is a lost free-tier answer and replaying the turn
+		// costs nothing. A key tier has already generated (and billed) the
+		// tokens behind the truncated body, so replaying it would bill the
+		// same turn twice for an answer the client never saw; those requests
+		// get the explicit upstream_error instead.
+		_, _, anonymousLane := requestCredential(requestCtx)
+		if err != nil && anonymousLane {
 			// Downstream headers are still unwritten, so one fresh round is
 			// safe (nothing is duplicated). This covers truncation between
 			// headers and a complete non-streaming body.
