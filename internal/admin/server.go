@@ -120,20 +120,23 @@ type ConfigView struct {
 	// as id/display pairs, so the WebUI builder can offer proxyfile entries
 	// without pasting raw URLs. Values are fingerprints; PUT accepts both
 	// fingerprints and raw URLs.
-	EffectiveProxies []SecretView             `json:"effective_proxies,omitempty"`
-	ProxyByModel     map[string][]string      `json:"proxy_by_model,omitempty"`
-	ProxyRetry       config.ProxyRetryConfig  `json:"proxy_retry,omitempty"`
-	ModelFallback    map[string]string        `json:"model_fallback,omitempty"`
-	Upstream         config.UpstreamConfig    `json:"upstream"`
-	Retry            config.RetryConfig       `json:"retry"`
-	Models           config.ModelsConfig      `json:"models"`
-	Performance      config.PerformanceConfig `json:"performance"`
-	Logging          config.LoggingConfig     `json:"logging"`
-	Prefer           config.Tier              `json:"prefer"`
-	Reasoning        config.ReasoningConfig   `json:"reasoning"`
-	WebUI            WebUIView                `json:"webui"`
-	Effective        EffectiveView            `json:"effective"`
-	Restart          []string                 `json:"restart_required_fields,omitempty"`
+	EffectiveProxies []SecretView `json:"effective_proxies,omitempty"`
+	// ProxyByModel is masked the same way as Proxies: pool entries carry
+	// credentials, so the view exposes fingerprints plus a redacted display
+	// string and never the raw URL.
+	ProxyByModel  map[string][]SecretView  `json:"proxy_by_model,omitempty"`
+	ProxyRetry    config.ProxyRetryConfig  `json:"proxy_retry,omitempty"`
+	ModelFallback map[string]string        `json:"model_fallback,omitempty"`
+	Upstream      config.UpstreamConfig    `json:"upstream"`
+	Retry         config.RetryConfig       `json:"retry"`
+	Models        config.ModelsConfig      `json:"models"`
+	Performance   config.PerformanceConfig `json:"performance"`
+	Logging       config.LoggingConfig     `json:"logging"`
+	Prefer        config.Tier              `json:"prefer"`
+	Reasoning     config.ReasoningConfig   `json:"reasoning"`
+	WebUI         WebUIView                `json:"webui"`
+	Effective     EffectiveView            `json:"effective"`
+	Restart       []string                 `json:"restart_required_fields,omitempty"`
 }
 
 type EffectiveView struct {
@@ -344,7 +347,7 @@ func (a *Server) configView() ConfigView {
 	effective, restart := a.manager.RestartStatus()
 	return ConfigView{
 		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
-		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, EffectiveProxies: maskSecrets(cfg.RuntimeProxies(), true), ProxyByModel: cfg.ProxyByModel, ProxyRetry: cfg.ProxyRetry, ModelFallback: cfg.ModelFallback, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
+		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, EffectiveProxies: maskSecrets(cfg.RuntimeProxies(), true), ProxyByModel: maskProxyPools(cfg.ProxyByModel), ProxyRetry: cfg.ProxyRetry, ModelFallback: cfg.ModelFallback, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
 		Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},
 		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled},
@@ -360,6 +363,17 @@ func maskSecrets(values []string, proxy bool) []SecretView {
 			display = config.RedactURL(value)
 		}
 		result = append(result, SecretView{ID: config.Fingerprint(value), Display: display})
+	}
+	return result
+}
+
+func maskProxyPools(pools map[string][]string) map[string][]SecretView {
+	if len(pools) == 0 {
+		return nil
+	}
+	result := make(map[string][]SecretView, len(pools))
+	for model, pool := range pools {
+		result[model] = maskSecrets(pool, true)
 	}
 	return result
 }
