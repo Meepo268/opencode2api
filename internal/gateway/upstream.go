@@ -130,9 +130,9 @@ func (g *Gateway) doUpstreamOffset(ctx context.Context, route models.Route, bodi
 }
 
 // isStaleReasoningReference reports whether an upstream 400 body describes a
-// stale reference this caller can no longer use upstream. Two distinct classes
-// match, and both are recoverable by dropping the stale pieces (reasoning items
-// and any previous_response_id chain link) and replaying once:
+// stale reference this caller can no longer use upstream. Three distinct
+// classes match, and all are recoverable by dropping the stale pieces
+// (reasoning items and any previous_response_id chain link) and replaying once:
 //
 //  1. Gone or expired reasoning: "Referenced reasoning item 'rs_...' was not
 //     found or has expired", "reasoning reference does not exist".
@@ -142,6 +142,12 @@ func (g *Gateway) doUpstreamOffset(ctx context.Context, route models.Route, bodi
 //     stripStaleReasoningInputs also drops previous_response_id -- typically
 //     copied into a fresh window by a compression tool, or filled in by hand
 //     with a stale response id.
+//  3. Issued to another caller: "reasoning `encrypted_content` was not issued
+//     to this caller". The encrypted reasoning blob is sealed to the account
+//     or anonymous exit that minted it, so it is rejected the moment the
+//     conversation is replayed to a different upstream caller -- which is what
+//     a provider/model switch, or a lane flip between the free tier and a key,
+//     does to an already-running window.
 //
 // Generic validation errors that merely mention reasoning (e.g. "unknown
 // reasoning field", "reasoning effort is not supported") must NOT match.
@@ -158,15 +164,44 @@ func isStaleReasoningReference(body []byte) bool {
 		}
 		return false
 	}
-	if !strings.Contains(text, "reasoning item") && !strings.Contains(text, "reasoning reference") {
-		return false
+	// Class 1 needs the explicit item/reference noun so an unrelated
+	// "reasoning" mention cannot match on the marker alone.
+	if strings.Contains(text, "reasoning item") || strings.Contains(text, "reasoning reference") {
+		for _, marker := range []string{"not found", "expir", "does not exist", "no longer"} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
 	}
-	for _, marker := range []string{"not found", "expir", "does not exist", "no longer"} {
-		if strings.Contains(text, marker) {
-			return true
+	// Class 3 is scoped to caller identity, so the message itself carries the
+	// proof: a reasoning blob exists but this caller never received it.
+	if strings.Contains(text, "reasoning") {
+		for _, marker := range []string{"not issued", "issued to another", "issued to a different", "does not belong to", "not recognized by this caller"} {
+			if strings.Contains(text, marker) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// staleReasoning400 reports whether resp is a 400 whose body describes an
+// unusable reasoning reference. The body is buffered and restored, so the
+// caller can still read it: doUpstreamTiers uses this to abandon the remaining
+// lanes early (a payload-bound reference cannot be fixed by another caller),
+// and doUpstream still reads the body afterwards for logging and replay.
+func staleReasoning400(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusBadRequest || resp.Body == nil {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	httpx.DrainAndClose(resp.Body)
+	if err != nil && len(raw) == 0 {
+		return false
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
+	resp.ContentLength = int64(len(raw))
+	return isStaleReasoningReference(raw)
 }
 
 // stripStaleReasoningInputs removes server-issued reasoning references from
@@ -229,15 +264,68 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		resp, err, used := g.doSelectedKeyUpstream(ctx, route, bodies, ids, override, attemptOffset)
 		return resp, route, used, err
 	}
-	if route.Anonymous {
+	// Session-pinned routing (anonymous_priority=false): once a session has
+	// found a working lane, send it straight back there instead of re-probing
+	// the free tier on every turn. Only models that actually have both lanes
+	// are pinned, and a pinned lane that fails still falls back to the other,
+	// so a transient key limit can never strand a conversation.
+	pinning := !g.cfg.AnonymousPriority && g.lanes != nil && route.Anonymous
+	pinnedLane := "" // "", "anonymous" or "key"
+	deferAnonymous := false
+	if pinning {
+		if anonymous, ok := g.lanes.get(ids.Session); ok {
+			pinnedLane, deferAnonymous = "key", true
+			if anonymous {
+				pinnedLane, deferAnonymous = "anonymous", false
+			}
+			if meta := telemetry.MetaFromContext(ctx); meta != nil {
+				meta.PinnedLane = pinnedLane
+			}
+		}
+	}
+	pin := func(anonymous bool) {
+		if pinning {
+			g.lanes.set(ids.Session, anonymous)
+		}
+	}
+	// markSwitched records that the serving lane differs from the pinned one,
+	// which is the signal that a conversation is drifting between lanes.
+	markSwitched := func(served string) {
+		if meta := telemetry.MetaFromContext(ctx); meta != nil && pinnedLane != "" && pinnedLane != served {
+			meta.LaneSwitched = true
+		}
+	}
+
+	var anonResp *http.Response
+	staleReasoning := false
+	runAnonymous := func() bool {
 		resp, err, used := g.doAnonymousUpstream(ctx, route, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
-			return resp, route, attempts, nil
+			pin(true)
+			markSwitched("anonymous")
+			anonResp = resp
+			return true
+		}
+		if staleReasoning400(resp) {
+			staleReasoning = true
 		}
 		lastResponse, lastErr = resp, err
+		effectiveRoute = route
+		return false
+	}
+
+	if route.Anonymous && !deferAnonymous {
+		if runAnonymous() {
+			return anonResp, route, attempts, nil
+		}
 		if len(route.KeyTiers) > 0 {
 			g.logger.Debug("anonymous request did not succeed; entering preferred key tiers", "component", "upstream", "event", "anonymous_fallback", "request_id", ids.Request, "attempts", attempts, "key_tiers", route.KeyTiers)
+		}
+		if staleReasoning {
+			// Same caller-bound reasoning rejection as the key phase: another lane
+			// would only repeat it.
+			return lastResponse, effectiveRoute, attempts, nil
 		}
 	}
 	if ctx.Err() != nil {
@@ -257,6 +345,7 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 	if !route.Anonymous && len(keyTiers) == 0 && (route.Tier == config.TierZen || route.Tier == config.TierGo) {
 		keyTiers = []config.Tier{route.Tier}
 	}
+	keyPhaseFailed := false
 	for _, tier := range keyTiers {
 		keyRoute := route
 		keyRoute.Tier = tier
@@ -266,6 +355,8 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		resp, err, used := g.doKeyUpstream(ctx, keyRoute, bodies, ids, attempts)
 		attempts += used
 		if err == nil && resp != nil && resp.StatusCode/100 == 2 {
+			pin(false)
+			markSwitched("key")
 			if lastResponse != nil {
 				httpx.DrainAndClose(lastResponse.Body)
 			}
@@ -280,7 +371,30 @@ func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodie
 		if err != nil {
 			lastErr = err
 		}
+		keyPhaseFailed = true
+		// A reasoning reference the upstream refuses is sealed to the caller that
+		// minted it, so another key tier cannot satisfy it either. Hand the 400
+		// back now and let doUpstream strip the stale items and replay once,
+		// instead of paying a second upstream round-trip for the same rejection.
+		if staleReasoning400(resp) {
+			return lastResponse, effectiveRoute, attempts, nil
+		}
 	}
+
+	// A session pinned away from the anonymous lane still gets that lane as a
+	// fallback once every key failed; otherwise a temporary key-side limit
+	// would fail the turn even though the free tier is reachable.
+	if deferAnonymous && keyPhaseFailed && ctx.Err() == nil {
+		if lastResponse != nil {
+			httpx.DrainAndClose(lastResponse.Body)
+			lastResponse = nil
+		}
+		g.logger.Debug("pinned key lane failed; falling back to the anonymous lane", "component", "upstream", "event", "anonymous_deferred_fallback", "request_id", ids.Request, "attempts", attempts)
+		if runAnonymous() {
+			return anonResp, route, attempts, nil
+		}
+	}
+
 	if lastResponse != nil {
 		return lastResponse, effectiveRoute, attempts, nil
 	}
@@ -415,6 +529,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		proxies++
 		var nodeResp *http.Response
 		var nodeErr error
+		var nodeDuration time.Duration
 		for index, baseURL := range upstreams {
 			if ctx.Err() != nil {
 				if lastErr == nil && lastResponse == nil {
@@ -454,6 +569,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				break
 			}
 			nodeResp, nodeErr = resp, err
+			nodeDuration = duration
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration, wire.BodyEffort(route.Protocol, preparedBodies[index]))
 			if err == nil && resp.StatusCode/100 == 2 {
 				g.observeAnonymousResult(ctx, node, resp, nil)
@@ -485,6 +601,16 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			// the session's exit affinity. A genuinely dead exit fails the
 			// sticky fast and is then skipped by tried/recovery above.
 			sticky = node
+		}
+		// A deterministic request-shape rejection cannot be fixed by a
+		// different exit: the bytes are identical, only the IP changes. The
+		// key tier already stops on these (isNonRetryableClientResponse);
+		// doing the same here is what keeps one bad 400 from burning every
+		// proxy in the pool. Authentication (401/403) and rate limits (429)
+		// are excluded by that helper and keep rotating below.
+		if nodeResp != nil && isNonRetryableClientResponse(nodeResp, nodeErr) {
+			g.logger.Debug("anonymous upstream rejected a non-retryable request", "component", "upstream", "event", "anonymous_attempt_rejected", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "channel", "anonymous", "status", nodeResp.StatusCode, "proxy", config.RedactURL(node.proxy.name), "duration_ms", nodeDuration.Milliseconds())
+			return nodeResp, nil, attempts
 		}
 	}
 	if lastResponse != nil {

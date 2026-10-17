@@ -114,8 +114,11 @@ type ConfigView struct {
 	ZenKeys    []SecretView `json:"zen_keys"`
 	GoKeys     []SecretView `json:"go_keys"`
 	Anonymous  bool         `json:"anonymous"`
-	Proxies    []SecretView `json:"proxies"`
-	ProxyFile  string       `json:"proxyfile"`
+	// AnonymousPriority reports the effective anonymous-lane preference; the
+	// lanes pin only exist while it is on.
+	AnonymousPriority bool         `json:"anonymous_priority"`
+	Proxies           []SecretView `json:"proxies"`
+	ProxyFile         string       `json:"proxyfile"`
 	// EffectiveProxies is the resolved RuntimeProxies list (proxies+proxyfile)
 	// as id/display pairs, so the WebUI builder can offer proxyfile entries
 	// without pasting raw URLs. Values are fingerprints; PUT accepts both
@@ -165,8 +168,11 @@ type ConfigUpdate struct {
 	ZenKeys    []SecretInput `json:"zen_keys"`
 	GoKeys     []SecretInput `json:"go_keys"`
 	Anonymous  bool          `json:"anonymous"`
-	Proxies    []SecretInput `json:"proxies"`
-	ProxyFile  string        `json:"proxyfile"`
+	// A pointer keeps the current preference when a WebUI save that does not
+	// render it yet omits the field; an explicit value replaces it.
+	AnonymousPriority *bool         `json:"anonymous_priority,omitempty"`
+	Proxies           []SecretInput `json:"proxies"`
+	ProxyFile         string        `json:"proxyfile"`
 	// Pointers distinguish an omitted field (keep the current pools, fallback,
 	// probe policy or refusal policy, which is what a WebUI save that does not
 	// render them yet implies) from an explicit empty object (clear it).
@@ -219,6 +225,10 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_proxies", err.Error())
 		return
 	}
+	anonymousPriority := current.AnonymousPriority
+	if update.AnonymousPriority != nil {
+		anonymousPriority = *update.AnonymousPriority
+	}
 	reasoning := current.Reasoning
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
@@ -260,7 +270,7 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	candidate := config.Config{
 		ServerKeyMetadata: current.ServerKeyMetadata,
 		Rotation:          current.Rotation,
-		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
+		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, AnonymousPriority: anonymousPriority, Proxies: proxies, ProxyFile: update.ProxyFile,
 		ProxyByModel: proxyByModel, ProxyRetry: proxyRetry, ProxyHealth: proxyHealth, ModelFallback: modelFallback, ContentRefusal: contentRefusal,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
@@ -387,7 +397,7 @@ func (a *Server) configView() ConfigView {
 	cfg := a.manager.Config()
 	effective, restart := a.manager.RestartStatus()
 	return ConfigView{
-		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
+		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous, AnonymousPriority: cfg.AnonymousPriority,
 		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, EffectiveProxies: maskSecrets(cfg.RuntimeProxies(), true), ProxyByModel: maskProxyPools(cfg.ProxyByModel), ProxyRetry: cfg.ProxyRetry, ProxyHealth: cfg.ProxyHealth, ModelFallback: cfg.ModelFallback, ContentRefusal: cfg.ContentRefusal, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models, Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},
 		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled},

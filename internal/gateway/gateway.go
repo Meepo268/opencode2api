@@ -61,6 +61,10 @@ type Gateway struct {
 	// first event), not just the header wait. Zero keeps the legacy behavior.
 	attemptTimeout time.Duration
 	refusals       *refusalStore
+	// lanes backs anonymous_priority=false session pinning. It is always
+	// allocated so a hot reload can switch modes without rebuilding the
+	// gateway; reads are skipped entirely when the mode is off.
+	lanes *sessionLanes
 }
 
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
@@ -97,6 +101,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),
 		refusals:       newRefusalStore(),
+		lanes:          newSessionLanes(defaultLaneCapacity, defaultLaneTTL),
 	}, nil
 }
 

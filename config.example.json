@@ -4,6 +4,7 @@
   "zen_keys": ["sk-your-zen-key"],
   "go_keys": [],
   "anonymous": false,
+  "anonymous_priority": true,
   "proxies": ["direct"],
   "proxyfile": "",
   "proxy_by_model": {},

@@ -217,6 +217,10 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 匿名阶段不受 `retry.max_attempts` 截断，但所有阶段共享请求总超时。网络错误、认证失败、限流和服务端错误可以触发 Key 轮换；其他 4xx 会结束当前 Tier，仍可继续尝试另一个可用 Tier。
 
+`anonymous_priority`（默认 `true`）对每个请求保持上述顺序：合格免费模型每轮都会先试匿名通道。设为 `false` 后按会话钉选通道：会话在某个通道成功一次，后续轮次直接从该通道开始并跳过另一个，避免回落前反复尝试免费通道。钉选通道失败时仍会回落到另一个通道，2 小时未活跃后钉选过期、回到默认顺序。`request_routed` 日志新增 `pinned_lane`（`anonymous` / `key` / 空）与 `lane_switched`，可确认会话是稳定钉在某个通道还是在两个通道间漂移。
+
+确定性请求形状错误（400/404/422）不在匿名池内逐个出口重试：字节相同，换出口改不了答案；认证失败（401/403）与限流（429）仍会换出口。
+
 每个 Tier 使用自己的原生协议编码请求。启用 `performance.first_event_timeout_seconds` 后，会先等待完整的 SSE data 事件再向客户端交付响应；注释心跳不算首事件。首事件前超时或断开会沿用现有 Key / 代理重试预算，交付后不再重放。默认 `0` 关闭，可对接受请求后无事件的上游尝试设置为 `15` 秒。它限制首事件而非首个文本 token，不适用于 System One；轮转别名使用独立的 `rotation.first_output_seconds`。识别到过期的 Responses reasoning 引用时，可执行一次修复重试；指定 Key 的诊断不会执行该重试。
 
 只有匿名通道可用时，`/v1/models` 仅展示符合匿名条件的模型。
@@ -259,6 +263,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `server_keys`               | 至少一个本地 Key。                                                                    |
 | `zen_keys`、`go_keys`       | 未启用匿名模式时，至少需要一个上游 Key。                                              |
 | `anonymous`                 | `false`。                                                                             |
+| `anonymous_priority`        | `true`；每个请求先试免费通道。设为 `false` 后按会话钉选上次成功的通道。 |
 | `prefer`                    | `go`；可选 `go`、`zen`。                                                              |
 | `upstream.zen`              | `https://opencode.ai/inference/openai`。                                                           |
 | `upstream.go`               | `https://opencode.ai/zen/go`。                                                        |
