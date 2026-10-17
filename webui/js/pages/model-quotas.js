@@ -1,8 +1,8 @@
 // Page: 模型与额度 — Go quota windows and free model availability.
 import { api, hasSession } from "../api.js";
-import { loadDebugModels } from "../data.js";
+import { loadConfig, loadDebugModels } from "../data.js";
 import { t, onChange } from "../i18n.js";
-import { $, bindTabs, copyText, el, emptyRow, localTime } from "../ui.js";
+import { $, bindTabs, copyText, el, emptyRow, localTime, toast } from "../ui.js";
 
 const windows = () => [
   ["rolling", t("5 小时窗口", "quotas.window.hour")],
@@ -171,19 +171,53 @@ async function loadAvailability() {
           ? t("对客户端显示", "availability.unhide")
           : t("对客户端隐藏", "availability.hide"),
       });
-      const run = async (path, body) => {
+      const probe = el("button", {
+        type: "button",
+        class: "btn btn-sm btn-ghost",
+        text: t("立即探测", "availability.probe"),
+        disabled: !!item.hidden,
+        title: item.hidden ? t("已隐藏，不探测", "availability.probeHidden") : "",
+      });
+      const run = async (path, body, isProbe = false) => {
         restore.disabled = true;
         toggle.disabled = true;
         hide.disabled = true;
+        probe.disabled = true;
         try {
-          await api(path, { method: "POST", body: JSON.stringify(body) });
+          const value = await api(path, { method: "POST", body: JSON.stringify(body) });
+          if (isProbe && value?.probe) {
+            // 探测接口总是返回结果：自动模型随后落账刷新表格；手动模型
+            // 按设计不落账（manual records frozen），所以必须把回包直接
+            // 递到用户眼前，否则“点了跟没点一样”。
+            const r = value.probe;
+            const parts = [
+              t("本次探测", "availability.probeResult"),
+              r.attempted
+                ? r.success
+                  ? t("可用", "availability.probeSuccess")
+                  : t("不可用", "availability.probeFailed")
+                : t("未执行", "availability.probeNotAttempted"),
+              r.reason,
+              r.channel,
+              r.proxy,
+            ].filter(Boolean);
+            if (r.attempted && !r.recorded) {
+              parts.push(
+                t("（手动状态：仅显示，不写入台账）", "availability.probeNotRecorded"),
+              );
+            }
+            toast(parts.join(" "), r.attempted && !r.success);
+          }
           await loadAvailability();
           await loadDebugModels();
+          // 隐藏状态同时写进配置视图，避免随后在配置页保存时把 models.hidden 冲掉。
+          if (path.endsWith("/hide")) await loadConfig();
         } catch (error) {
           $("#availability-error").textContent = error.message;
           restore.disabled = !item.disabled;
           toggle.disabled = false;
           hide.disabled = false;
+          probe.disabled = !!item.hidden;
         }
       };
       restore.addEventListener("click", () => run("/api/models/restore", { model: item.model }));
@@ -193,6 +227,7 @@ async function loadAvailability() {
       hide.addEventListener("click", () =>
         run("/api/models/hide", { model: item.model, hidden: !item.hidden }),
       );
+      probe.addEventListener("click", () => run("/api/models/probe", { model: item.model }, true));
       host.append(
         el("tr", {}, [
           el("td", {}, [
@@ -232,7 +267,7 @@ async function loadAvailability() {
                 ? t("手动控制，不自动探测", "availability.manualControl")
                 : date(item.next_check),
           }),
-          el("td", {}, [el("div", { class: "key-actions" }, [restore, toggle, hide])]),
+          el("td", {}, [el("div", { class: "key-actions" }, [restore, toggle, probe, hide])]),
         ]),
       );
     }

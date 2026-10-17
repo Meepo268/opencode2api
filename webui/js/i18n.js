@@ -107,7 +107,7 @@ const DICTIONARY = {
       "availability.title": "Probe free models",
       "availability.refresh": "Refresh status",
       "availability.desc":
-        "Probes models whose metadata name contains free or whose price is 0 and that have not been excluded. The anonymous channel is tried first, and a Zen Key only after that; a model is disabled once it is genuinely broken and retried after 24 hours. Transient errors do not add extra disabled models: an enabled model is retried after 1 hour, and a disabled one keeps its old reason and is retried after 24 hours. When a model is re-enabled or switched to manual control it stays enabled and is no longer probed automatically; when it switches back to automatic, the next scheduler tick schedules the probe. System One uses its own dedicated 1+1 decision question set. With the effort set to auto, the highest probed and verified effort is shown. Hidden models are not listed in /v1/models and are never routed, but they are still probed and shown here.",
+        "Probes models whose metadata name contains free or whose price is 0 and that have not been excluded. The anonymous channel is tried first, and a Zen Key only after that; a model is disabled once it is genuinely broken and retried after 24 hours. Transient errors do not add extra disabled models: an enabled model is retried after 1 hour, and a disabled one keeps its old reason and is retried after 24 hours. When a model is re-enabled or switched to manual control it stays enabled and is no longer probed automatically; when it switches back to automatic, the next scheduler tick schedules the probe. System One uses its own dedicated 1+1 decision question set. With the effort set to auto, the highest probed and verified effort is shown. Hidden models are not listed in /v1/models and are never routed; they stay in the table so they can be unhidden here or from the routing table, but they are no longer probed.",
       "availability.col.model": "Model",
       "availability.col.state": "State",
       "availability.col.channel": "Channel / result",
@@ -257,6 +257,8 @@ const DICTIONARY = {
         "Sensitive values are masked by default; a cleared value only takes effect after saving.",
       "config.secrets.reveal": "Reveal after re-verification",
       "config.secrets.anonymous": "Enable the Zen anonymous channel",
+      "config.secrets.anonymousPriority": "Anonymous first: try the anonymous channel, then the keys",
+      "config.secrets.anonymousPriorityHint": "When off, server keys are tried before the anonymous channel.",
       "config.secrets.add": "One key per line",
       "config.proxy.title": "Proxy nodes",
       "config.proxy.caption":
@@ -267,6 +269,8 @@ const DICTIONARY = {
         "anonymous will use every available proxy; an explicit protocol mapping wins over inferring the protocol from the model name.",
       "config.upstream.freeOnly": "Only expose free models (even when Zen / Go Keys are configured)",
       "config.upstream.attempts": "Max attempts per Key Tier",
+      "config.upstream.anonymous": "Anonymous upstream URL",
+      "config.upstream.anonymousHint": "Keyless free-model lane; leave empty to fall back to the default address.",
       "config.upstream.timeout": "Request timeout (seconds)",
       "config.upstream.refresh": "Model refresh interval (seconds)",
       "config.upstream.protocols": "Model protocol overrides (JSON)",
@@ -292,6 +296,9 @@ const DICTIONARY = {
       "config.performance.ring": "Log ring size",
       "config.performance.dump":
         "Write outbound request dumps (masked, for tracing retries and conversions only)",
+      "config.logging.file": "Save logs to a file (auto-creates the log folder and keeps writing JSON logs)",
+      "config.logging.filePath": "Log file path (leave empty for the default)",
+      "config.logging.filePathNote": "Relative paths resolve next to config.json; missing folders are created automatically; unchecking stops file logging; with request-body dump enabled the file also contains conversation content.",
       "config.reload": "Reload from disk",
       "config.save": "Validate, save, and apply",
 
@@ -576,6 +583,99 @@ const DICTIONARY = {
       "toast.rotation.saved": "Model rotation configuration saved and in effect",
       "toast.rotation.switched": "Current model switched",
       "toast.rotation.dirty": "There are unsaved changes; save before refreshing",
+
+      "config.json.object": "“{0}” must be a JSON object",
+
+      "diagnostics.col.effort": "Effort",
+      "diagnostics.col.upstream": "Upstream gate",
+      "diagnostics.col.stream": "Type",
+      "diagnostics.models.col.effort": "Applied effort",
+      "diag.auto": "auto",
+      "diag.stream": "Stream",
+      "diag.nonStream": "Non-stream",
+
+      "availability.probe": "Probe now",
+      "availability.probeHidden": "Hidden — not probed",
+      "availability.probeResult": "Probe result",
+      "availability.probeSuccess": "available",
+      "availability.probeFailed": "unavailable",
+      "availability.probeNotAttempted": "not attempted",
+      "availability.probeNotRecorded": "(manual state: shown only, not recorded)",
+
+      "config.reasoning.precedence": "Override precedence",
+      "config.reasoning.precedence.client": "Client-specified > per-model override > default effort",
+      "config.reasoning.precedence.byModel": "Per-model override > client-specified > default effort",
+      "config.reasoning.auto.title": "Probed reasoning efforts",
+      "config.reasoning.auto.caption":
+        "Latest anonymous probe result; “write override” fills the per-model JSON above.",
+      "config.reasoning.auto.refresh": "Refresh results",
+      "config.reasoning.auto.col.model": "Model",
+      "config.reasoning.auto.col.effort": "Effort",
+      "config.reasoning.auto.col.status": "Status",
+      "config.reasoning.auto.col.action": "Action",
+      "config.reasoning.auto.write": "Write override",
+      "config.reasoning.auto.written":
+        "Wrote {0}={1}; save the configuration to apply it",
+      "config.reasoning.auto.empty": "No verified effort yet; wait for a probe and refresh.",
+
+      "config.fallback.title": "Model fallback",
+      "config.fallback.caption":
+        "When the primary model fails the request is retried on the mapped fallback (single hop); a failing fallback keeps the original error.",
+      "config.fallback.config": "Fallback map (JSON)",
+      "config.fallback.note":
+        "Keys are primary models, values are a single fallback model (no self reference or cycles); the builder rewrites this JSON directly.",
+      "config.refusal.caption": "Refusal rewrite: when upstream refuses on content grounds, feed the refusal back on the same lane and retry up to the configured rounds.",
+      "config.refusal.rounds": "Refusal rewrite rounds",
+      "config.refusal.note": "0 disables it; every round is billed again.",
+      "config.fallback.from": "Primary model",
+      "config.fallback.to": "Fallback model",
+      "config.fallback.add": "Add fallback",
+      "config.fallback.col.from": "Primary model",
+      "config.fallback.col.to": "Fallback model",
+      "config.fallback.col.action": "Action",
+      "config.fallback.empty": "No fallback yet; use the builder below or edit the JSON.",
+      "config.fallback.needSelect": "Pick a model on both sides first",
+      "config.fallback.self": "The fallback model must differ from the primary model",
+
+      "config.proxy.byModelTitle": "Model → Proxy pinning",
+      "config.proxy.byModelCaption":
+        "Matching models are forced onto the listed exits; an empty list falls back to the default policy.",
+      "config.proxy.byModel": "Per-model binding (JSON)",
+      "config.proxy.byModelNote":
+        "The builder rewrites this JSON directly; exit names must match the proxies configured above.",
+      "config.proxy.pbmModel": "Model",
+      "config.proxy.pbmAnyModel": "(any model)",
+      "config.proxy.pbmExits": "Exits to bind (one per line)",
+      "config.proxy.pbmPick": "Pick exits (multi-select)",
+      "config.proxy.pbmPickNote":
+        "Exit choices come from the proxies configured above (including proxies imported from a file). Click order becomes the binding order — earlier clicks come first.",
+      "config.proxy.pbmReset": "Reset picks",
+      "config.proxy.pbmNoExits":
+        "No exits configured yet; add a Proxy above or fill in the proxy file first.",
+      "config.proxy.pbmAdd": "Add binding",
+      "config.proxy.pbmCol.model": "Model",
+      "config.proxy.pbmCol.exits": "Exits",
+      "config.proxy.pbmCol.action": "Action",
+      "config.proxy.pbmEmpty": "No binding yet; use the builder below or edit the JSON.",
+      "config.proxy.pbmNeedExits": "Pick at least one exit first",
+      "config.proxy.healthTitle": "Exit retry and health probes",
+      "config.proxy.healthCaption":
+        "Exit failures retry per count and interval; health probes only recheck proxies marked unhealthy.",
+      "config.proxy.retryAttempts": "Exit retries (0 = follow global)",
+      "config.proxy.retryInterval": "Exit retry interval (s, 0 = disabled)",
+      "config.proxy.healthInterval": "Probe interval (min)",
+      "config.proxy.healthTimeout": "Probe timeout (s)",
+      "config.proxy.healthBackoff": "Probe backoff cap (min)",
+      "config.proxy.healthUrl": "Probe URL",
+      "config.proxy.healthDisabled": "Disable proxy health probes (no automatic rechecks)",
+      "config.fallbackcircuit.title": "Cross-request breaker (off by default)",
+      "config.fallbackcircuit.caption":
+        "When on: a model bound to an exit that hard-fails (refused / DNS / TLS) stops after one sticky retry, then requests detour to the fallback model. At pause expiry its own exits are probed first; only a passing probe switches back.",
+      "config.fallbackcircuit.mode": "Mode",
+      "config.fallbackcircuit.modeOff": "off (legacy main-branch retries)",
+      "config.fallbackcircuit.modeFast": "fast (fail-fast + cross-request breaker)",
+      "config.fallbackcircuit.pause": "Pause length (s, 0 = default 300)",
+      "config.fallbackcircuit.revival": "Revival probe sweep interval (s, 0 = default 30)",
     },
 
     vi: {
@@ -662,7 +762,7 @@ const DICTIONARY = {
       "availability.title": "Dò mô hình miễn phí",
       "availability.refresh": "Làm mới trạng thái",
       "availability.desc":
-        "Kiểm tra các mô hình có tên chứa free hoặc giá bằng 0 trong metadata và chưa bị loại bỏ. Ưu tiên kênh ẩn danh, sau đó mới thử Zen Key; chỉ vô hiệu hóa khi mô hình hẳn đã hỏng và thử lại sau 24 giờ. Lỗi tạm thời không tạo thêm mô hình bị vô hiệu hóa: mô hình đang bật thử lại sau 1 giờ, mô hình đã tắt giữ nguyên lý do cũ và thử lại sau 24 giờ. Khi khôi phục bật hoặc chuyển sang điều khiển thủ công, mô hình giữ nguyên bật và không còn được dò tự động; khi chuyển lại tự động, lượt định tuyến kế tiếp sẽ sắp xếp lần dò. System One dùng bộ câu hỏi quyết định riêng 1+1. Khi đặt cường độ auto, hiển thị bậc cao nhất đã được dò xác minh. Mô hình bị ẩn không còn trong /v1/models và không được định tuyến, nhưng vẫn được dò và hiển thị tại đây.",
+        "Kiểm tra các mô hình có tên chứa free hoặc giá bằng 0 trong metadata và chưa bị loại bỏ. Ưu tiên kênh ẩn danh, sau đó mới thử Zen Key; chỉ vô hiệu hóa khi mô hình hẳn đã hỏng và thử lại sau 24 giờ. Lỗi tạm thời không tạo thêm mô hình bị vô hiệu hóa: mô hình đang bật thử lại sau 1 giờ, mô hình đã tắt giữ nguyên lý do cũ và thử lại sau 24 giờ. Khi khôi phục bật hoặc chuyển sang điều khiển thủ công, mô hình giữ nguyên bật và không còn được dò tự động; khi chuyển lại tự động, lượt định tuyến kế tiếp sẽ sắp xếp lần dò. System One dùng bộ câu hỏi quyết định riêng 1+1. Khi đặt cường độ auto, hiển thị bậc cao nhất đã được dò xác minh. Mô hình bị ẩn không còn trong /v1/models và không được định tuyến; chúng vẫn nằm trong bảng để có thể bỏ ẩn tại đây hoặc ở bảng định tuyến, nhưng không còn được dò nữa.",
       "availability.col.model": "Mô hình",
       "availability.col.state": "Trạng thái",
       "availability.col.channel": "Kênh / Kết quả",
@@ -812,6 +912,8 @@ const DICTIONARY = {
         "Giá trị nhạy cảm mặc định chỉ hiện dạng che; chỉ lưu sau khi gỡ bỏ mới có hiệu lực.",
       "config.secrets.reveal": "Xem sau khi xác minh lại",
       "config.secrets.anonymous": "Bật kênh ẩn danh Zen",
+      "config.secrets.anonymousPriority": "Ưu tiên ẩn danh: thử kênh ẩn danh trước, rồi đến key",
+      "config.secrets.anonymousPriorityHint": "Khi tắt, server key được thử trước kênh ẩn danh.",
       "config.secrets.add": "Mỗi dòng thêm một key",
       "config.proxy.title": "Nút Proxy",
       "config.proxy.caption":
@@ -822,6 +924,8 @@ const DICTIONARY = {
         "anonymous sẽ dùng hết các Proxy khả dụng; ánh xạ protocol tường minh được ưu tiên hơn việc suy luận từ tên mô hình.",
       "config.upstream.freeOnly": "Chỉ công khai mô hình miễn phí (kể cả khi đã cấu hình Zen / Go Key)",
       "config.upstream.attempts": "Số lần thử tối đa cho mỗi Key Tier",
+      "config.upstream.anonymous": "URL upstream ẩn danh",
+      "config.upstream.anonymousHint": "Kênh mô hình miễn phí không cần key; để trống sẽ dùng địa chỉ mặc định.",
       "config.upstream.timeout": "Timeout của request (giây)",
       "config.upstream.refresh": "Làm mới mô hình (giây)",
       "config.upstream.protocols": "Ghi đè giao thức mô hình (JSON)",
@@ -848,6 +952,9 @@ const DICTIONARY = {
       "config.performance.ring": "Kích thước ring log",
       "config.performance.dump":
         "Ghi dump request đi ra (đã che, chỉ dùng để truy vết retry và chuyển đổi)",
+      "config.logging.file": "Lưu log ra tệp (tự tạo thư mục log và ghi log JSON liên tục)",
+      "config.logging.filePath": "Đường dẫn tệp log (để trống dùng mặc định)",
+      "config.logging.filePathNote": "Đường dẫn tương đối tính từ thư mục chứa config.json; thư mục thiếu sẽ tự được tạo; bỏ chọn để ngừng ghi tệp; khi bật dump thân yêu cầu, tệp sẽ chứa nội dung hội thoại.",
       "config.reload": "Nạp lại từ đĩa",
       "config.save": "Kiểm tra, lưu và áp dụng",
 
@@ -1132,6 +1239,99 @@ const DICTIONARY = {
       "toast.rotation.saved": "Đã lưu cấu hình luân chuyển mô hình và có hiệu lực",
       "toast.rotation.switched": "Đã chuyển mô hình hiện tại",
       "toast.rotation.dirty": "Có thay đổi chưa lưu, hãy lưu trước khi làm mới",
+
+      "config.json.object": "“{0}” phải là đối tượng JSON",
+
+      "diagnostics.col.effort": "Cường độ",
+      "diagnostics.col.upstream": "Cổng upstream",
+      "diagnostics.col.stream": "Kiểu",
+      "diagnostics.models.col.effort": "Cường độ áp dụng",
+      "diag.auto": "tự động",
+      "diag.stream": "Stream",
+      "diag.nonStream": "Không stream",
+
+      "availability.probe": "Probe ngay",
+      "availability.probeHidden": "Đã ẩn — không dò",
+      "availability.probeResult": "Kết quả dò",
+      "availability.probeSuccess": "dùng được",
+      "availability.probeFailed": "không dùng được",
+      "availability.probeNotAttempted": "chưa dò được",
+      "availability.probeNotRecorded": "(trạng thái thủ công: chỉ hiển thị, không ghi vào sổ)",
+
+      "config.reasoning.precedence": "Thứ tự ưu tiên ghi đè",
+      "config.reasoning.precedence.client": "Client chỉ định > ghi đè theo mô hình > mức mặc định",
+      "config.reasoning.precedence.byModel": "Ghi đè theo mô hình > Client chỉ định > mức mặc định",
+      "config.reasoning.auto.title": "Cường độ suy luận đã kiểm chứng",
+      "config.reasoning.auto.caption":
+        "Kết quả probe ẩn danh gần nhất; “ghi đè” sẽ điền vào JSON theo mô hình ở trên.",
+      "config.reasoning.auto.refresh": "Làm mới kết quả",
+      "config.reasoning.auto.col.model": "Mô hình",
+      "config.reasoning.auto.col.effort": "Cường độ",
+      "config.reasoning.auto.col.status": "Trạng thái",
+      "config.reasoning.auto.col.action": "Thao tác",
+      "config.reasoning.auto.write": "Ghi đè",
+      "config.reasoning.auto.written":
+        "Đã ghi {0}={1}; hãy lưu cấu hình để có hiệu lực",
+      "config.reasoning.auto.empty": "Chưa có cường độ nào được kiểm chứng; hãy chờ probe rồi làm mới.",
+
+      "config.fallback.title": "Mô hình dự phòng",
+      "config.fallback.caption":
+        "Khi mô hình chính thất bại, yêu cầu sẽ thử lại với mô hình dự phòng (một bước); nếu dự phòng vẫn lỗi sẽ giữ lỗi ban đầu.",
+      "config.fallback.config": "Bản đồ dự phòng (JSON)",
+      "config.fallback.note":
+        "Khóa là mô hình chính, giá trị là một mô hình dự phòng (không tự trỏ và không vòng lặp); bộ dựng sẽ ghi trực tiếp vào JSON này.",
+      "config.refusal.caption": "Viết lại khi bị từ chối: khi upstream từ chối vì nội dung, đưa lý do từ chối trở lại cùng kênh và thử lại tối đa số vòng đã đặt.",
+      "config.refusal.rounds": "Số vòng viết lại khi bị từ chối",
+      "config.refusal.note": "0 là tắt; mỗi vòng được tính phí lại.",
+      "config.fallback.from": "Mô hình chính",
+      "config.fallback.to": "Mô hình dự phòng",
+      "config.fallback.add": "Thêm dự phòng",
+      "config.fallback.col.from": "Mô hình chính",
+      "config.fallback.col.to": "Mô hình dự phòng",
+      "config.fallback.col.action": "Thao tác",
+      "config.fallback.empty": "Chưa có mục dự phòng; dùng trình xây dựng bên dưới hoặc sửa JSON.",
+      "config.fallback.needSelect": "Hãy chọn mô hình ở cả hai bên trước",
+      "config.fallback.self": "Mô hình dự phòng không được trùng với mô hình chính",
+
+      "config.proxy.byModelTitle": "Mô hình → Proxy cố định",
+      "config.proxy.byModelCaption":
+        "Mô hình khớp sẽ buộc đi qua các exit đã liệt kê; danh sách trống sẽ dùng chính sách mặc định.",
+      "config.proxy.byModel": "Gắn kết theo mô hình (JSON)",
+      "config.proxy.byModelNote":
+        "Bộ dựng sẽ ghi trực tiếp vào JSON này; tên exit phải trùng với Proxy đã cấu hình ở trên.",
+      "config.proxy.pbmModel": "Mô hình",
+      "config.proxy.pbmAnyModel": "(mọi mô hình)",
+      "config.proxy.pbmExits": "Exit cần gắn kết (mỗi dòng một cái)",
+      "config.proxy.pbmPick": "Chọn cổng ra (chọn nhiều được)",
+      "config.proxy.pbmPickNote":
+        "Danh sách cổng ra lấy từ các proxy đã cấu hình phía trên (kể cả proxy từ tệp). Thứ tự bấm chính là thứ tự gắn kết — bấm trước đứng trước.",
+      "config.proxy.pbmReset": "Bỏ chọn hết",
+      "config.proxy.pbmNoExits":
+        "Chưa có cổng ra nào; hãy thêm Proxy phía trên hoặc điền tệp proxy trước.",
+      "config.proxy.pbmAdd": "Thêm gắn kết",
+      "config.proxy.pbmCol.model": "Mô hình",
+      "config.proxy.pbmCol.exits": "Exit",
+      "config.proxy.pbmCol.action": "Thao tác",
+      "config.proxy.pbmEmpty": "Chưa có gắn kết nào; dùng trình xây dựng bên dưới hoặc sửa JSON.",
+      "config.proxy.pbmNeedExits": "Bấm chọn ít nhất một exit trước",
+      "config.proxy.healthTitle": "Thử lại và kiểm tra sức khỏe exit",
+      "config.proxy.healthCaption":
+        "Exit lỗi sẽ thử lại theo số lần và khoảng cách; kiểm tra sức khỏe chỉ kiểm lại proxy được đánh dấu kém.",
+      "config.proxy.retryAttempts": "Số lần thử lại exit (0 = theo toàn cục)",
+      "config.proxy.retryInterval": "Khoảng thử lại exit (giây, 0 = tắt)",
+      "config.proxy.healthInterval": "Khoảng probe (phút)",
+      "config.proxy.healthTimeout": "Hạn probe (giây)",
+      "config.proxy.healthBackoff": "Trần lùi probe (phút)",
+      "config.proxy.healthUrl": "URL probe",
+      "config.proxy.healthDisabled": "Tắt kiểm tra sức khỏe proxy (không tự kiểm lại)",
+      "config.fallbackcircuit.title": "Cầu chì liên yêu cầu (mặc định tắt)",
+      "config.fallbackcircuit.caption":
+        "Khi bật: model gắn exit gặp lỗi cứng (từ chối / DNS / TLS) sẽ dừng sau một lần thử sticky, rồi các yêu cầu tạm sang model dự phòng. Hết thời hạn tạm dừng sẽ probe exit của chính nó trước; chỉ khi probe đạt mới quay lại model chính.",
+      "config.fallbackcircuit.mode": "Chế độ",
+      "config.fallbackcircuit.modeOff": "off (hành vi nhánh chính cũ)",
+      "config.fallbackcircuit.modeFast": "fast (cắt nhanh + cầu chì liên yêu cầu)",
+      "config.fallbackcircuit.pause": "Thời gian tạm dừng (giây, 0 = mặc định 300)",
+      "config.fallbackcircuit.revival": "Chu kỳ quét probe hồi phục (giây, 0 = mặc định 30)",
     },
   };
 

@@ -157,6 +157,26 @@ textarea {
   grid-column: 1 / -1;
 }
 
+/* Two selects plus an add button in one row (模型绑定 / 模型回退 builder). */
+.trio-grid,
+.pbm-grid {
+  display: grid;
+  align-items: end;
+  column-gap: var(--sp-4);
+}
+
+.trio-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.pbm-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) auto;
+}
+
+.pbm-add-field textarea {
+  min-height: 58px;
+}
+
 .form-error {
   min-height: 20px;
   margin-top: var(--sp-2);
@@ -288,6 +308,39 @@ textarea {
 
 .chip button:hover {
   color: var(--bad);
+}
+
+/* 模型→出口绑定构建器：可点选出口标签（点选=反选）。 */
+.chip-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.exit-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-sm);
+  background: var(--bg-subtle);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.exit-chip:hover {
+  border-color: var(--border-2);
+}
+
+.exit-chip.active {
+  border-color: var(--inverse-bg);
+  background: var(--inverse-bg);
+  color: var(--inverse-text);
+}
+
+.chip-empty {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
 }
 
 .code-card {
@@ -493,6 +546,16 @@ progress::-moz-progress-bar {
 
   .form-grid .full {
     grid-column: auto;
+  }
+
+  .trio-grid,
+  .pbm-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trio-grid .btn,
+  .pbm-grid .btn {
+    justify-self: end;
   }
 
   .filters {

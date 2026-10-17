@@ -370,6 +370,7 @@ pool+http://127.0.0.1:7891
 | `logging.level`               | `info`；可选 `debug`、`info`、`warn`、`error`。 |
 | `logging.ring_size`           | `2000`；范围为 100–50,000。                     |
 | `logging.dump_request_bodies` | `false`；配合 `debug` 日志级别输出上游请求体。  |
+| `logging.file_path`           | 留空不落盘；配置中心「日志」页签勾选「保存日志到文件」并填路径即启用，勾选但留空回落到 `logs/opencode2api.log`。 |
 | `webui.enabled`               | 省略时为 `false`；示例配置设置为 `true`。       |
 | `webui.listen`                | `0.0.0.0:8081`。                                |
 | `webui.username`              | 启用 WebUI 时必填；示例为 `admin`。             |
