@@ -231,6 +231,19 @@ func normalizeProxyHealth(cfg *Config) {
 	cfg.ProxyHealth = health
 }
 
+// normalizeContentRefusal clamps the session-detour budget. Rounds defaults
+// to defaultContentRefusalRounds via Load seeding; an explicit 0 disables
+// the detour, negatives are treated as 0, and large values are capped so a
+// typo cannot pin a session to the fallback model indefinitely.
+func normalizeContentRefusal(cfg *Config) {
+	if cfg.ContentRefusal.Rounds < 0 {
+		cfg.ContentRefusal.Rounds = 0
+	}
+	if cfg.ContentRefusal.Rounds > 20 {
+		cfg.ContentRefusal.Rounds = 20
+	}
+}
+
 func normalizeModelFallback(cfg *Config) error {
 	if len(cfg.ModelFallback) == 0 {
 		cfg.ModelFallback = nil

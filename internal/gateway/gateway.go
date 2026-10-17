@@ -60,6 +60,7 @@ type Gateway struct {
 	// attemptTimeout bounds a whole upstream attempt (dial + write + headers +
 	// first event), not just the header wait. Zero keeps the legacy behavior.
 	attemptTimeout time.Duration
+	refusals       *refusalStore
 }
 
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
@@ -95,6 +96,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		catalog:        catalog,
 		monitor:        monitor,
 		attemptTimeout: attemptDeadline(cfg),
+		refusals:       newRefusalStore(),
 	}, nil
 }
 
@@ -212,16 +214,60 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			meta.Request = ids.Request
 			meta.Session = ids.Session
 		}
+		primaryModel := model
+		servingPrimary := true
+		refusalProbe := false
+		probeFailed := false
+		if st, ok := g.refusals.armed(ids.Session); ok && len(g.cfg.ModelFallback) > 0 {
+			if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
+				// The detour only applies when this request names the same
+				// primary that refused: an explicit request for another
+				// model must never be hijacked into st.to.
+				if want, ok := matchRefusalDetour(model, st, g.cfg.FallbackFor); ok {
+					if st.remaining > 0 {
+						if fallbackRoute, routeErr := g.catalog.Route(want, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous); routeErr == nil {
+							fallbackPayload := make(map[string]any, len(payload)+1)
+							for key, value := range payload {
+								fallbackPayload[key] = value
+							}
+							fallbackPayload["model"] = want
+							if fallbackBodies, bodyErr := g.prepareRouteBodies(external, fallbackRoute, fallbackPayload); bodyErr == nil {
+								route = fallbackRoute
+								bodies = fallbackBodies
+								payload = fallbackPayload
+								model = want
+								servingPrimary = false
+								if meta != nil {
+									meta.Model = want
+									meta.Effort = g.resolvedEffort(want, fallbackRoute.Tier, fallbackRoute.Protocol)
+								}
+								w.Header().Set("x-resolved-model", want)
+							}
+						}
+					} else if st.remaining == 0 {
+						refusalProbe = true
+					}
+				}
+			}
+		}
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 		defer cancel()
 		upstreamCtx := requestCtx
 		resp, upstreamRoute, err := g.doUpstream(upstreamCtx, route, bodies, ids)
-		if err != nil && shouldModelFallback(requestCtx, err, nil) {
-			if fallback := g.cfg.FallbackFor(model); fallback != "" {
+		// A turn already serving a fallback (start-detour) keeps its answer:
+		// the single-hop budget is spent, so no second hop is attempted here.
+		if servingPrimary && model == primaryModel && err != nil && shouldModelFallback(requestCtx, err, nil) {
+			if fallback := g.cfg.FallbackFor(primaryModel); fallback != "" {
 				if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
 					if fallbackResp, fallbackRoute, fallbackErr := g.tryModelFallback(upstreamCtx, external, payload, ids, model, fallback); fallbackErr == nil && fallbackResp != nil {
 						g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+						// doUpstream may return a non-nil body alongside the
+						// budget-expiry error; drain it before overwriting so
+						// the connection is released.
+						if resp != nil {
+							httpx.DrainAndClose(resp.Body)
+						}
 						resp, upstreamRoute, err = fallbackResp, fallbackRoute, nil
 						model = fallback
 						if meta != nil {
@@ -278,8 +324,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		w.Header().Set("x-request-id", ids.Request)
 		if resp.StatusCode/100 != 2 {
-			if shouldModelFallback(requestCtx, nil, resp) {
-				if fallback := g.cfg.FallbackFor(model); fallback != "" {
+			// One fallback per turn: after an error-budget fallback the
+			// model already moved, and a detour turn keeps serving its
+			// fallback's answer instead of chaining further.
+			if servingPrimary && model == primaryModel && shouldModelFallback(requestCtx, nil, resp) {
+				if fallback := g.cfg.FallbackFor(primaryModel); fallback != "" {
 					if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
 						// Buffer the primary error body before draining it, so a
 						// failed fallback can still relay the real status and
@@ -335,17 +384,64 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				g.monitor.BeginStream()
 				defer g.monitor.EndStream()
 			}
+			// Pre-flush refusal detection is skipped unless this turn can
+			// actually fall back: otherwise every primary stream would pay
+			// a first-event buffering delay for nothing.
+			if servingPrimary && model == primaryModel && g.cfg.FallbackFor(primaryModel) != "" {
+				if firstEvent, replay, peekErr := peekFirstEvent(resp.Body); peekErr == nil || len(firstEvent) > 0 {
+					if replay != nil {
+						resp.Body = replay
+					}
+					if firstEventRefusal(firstEvent) {
+						if fallback := g.cfg.FallbackFor(primaryModel); fallback != "" {
+							if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
+								if fallbackResp, fallbackRoute, fallbackErr := g.tryModelFallback(upstreamCtx, external, payload, ids, primaryModel, fallback); fallbackErr == nil && fallbackResp != nil {
+									g.logger.Info("content refusal fallback succeeded", "component", "upstream", "event", "refusal_fallback", "request_id", ids.Request, "from_model", primaryModel, "to_model", fallback)
+									httpx.DrainAndClose(resp.Body)
+									resp = fallbackResp
+									defer resp.Body.Close()
+									upstreamRoute = fallbackRoute
+									model = fallback
+									if meta != nil {
+										meta.Model = fallback
+										meta.Tier = string(upstreamRoute.Tier)
+										meta.Protocol = upstreamRoute.Protocol
+										meta.Effort = g.resolvedEffort(fallback, upstreamRoute.Tier, upstreamRoute.Protocol)
+									}
+									w.Header().Set("x-resolved-model", fallback)
+									g.armRefusal(ids.Session, primaryModel, fallback)
+									servingPrimary = false
+									if refusalProbe {
+										probeFailed = true
+									}
+								} else {
+									g.logger.Warn("content refusal fallback failed; keeping primary stream", "component", "upstream", "event", "refusal_fallback_failed", "request_id", ids.Request, "from_model", primaryModel, "to_model", fallback, "error", fallbackErr)
+									if fallbackResp != nil {
+										httpx.DrainAndClose(fallbackResp.Body)
+									}
+									if refusalProbe {
+										probeFailed = true
+									}
+								}
+							}
+						}
+					}
+				} else if replay != nil {
+					resp.Body = replay
+				}
+			}
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
+			sniff := &sniffWriter{w: w, enabled: servingPrimary && model == primaryModel && g.cfg.FallbackFor(primaryModel) != ""}
 			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, streamBody, upstreamRoute.Protocol, model)
+				usage, usageReported, err = wire.ForwardStream(r.Context(), sniff, streamBody, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = wire.TranscodeStream(r.Context(), sniff, streamBody, upstreamRoute.Protocol, external, model)
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -358,6 +454,21 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				g.logger.Warn("downstream stream ended with an error", "component", "stream", "event", "stream_failed", "request_id", ids.Request, "model", model, "tier", upstreamRoute.Tier, "error", err)
+			}
+			// A mid-stream refusal cannot move the current turn (HTTP 200 is
+			// committed); it only arms the next requests. Turns already
+			// serving a fallback never re-arm.
+			if sniff.tripped && servingPrimary && model == primaryModel && g.cfg.FallbackFor(primaryModel) != "" {
+				g.armRefusal(ids.Session, primaryModel, g.cfg.FallbackFor(primaryModel))
+				if refusalProbe {
+					probeFailed = true
+				}
+			}
+			if !servingPrimary {
+				g.refusals.consumed(ids.Session)
+			}
+			if refusalProbe && !probeFailed && !(sniff.tripped && servingPrimary) {
+				g.refusals.clear(ids.Session)
 			}
 			return
 		}
@@ -391,35 +502,69 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
 		}
-		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) {
-			// Key-tier shaped requests were force-streamed like the
-			// anonymous lane; collapse the same way.
-			// The anonymous lane is served streaming (see prepareAnonymousBody);
-			// collapse the events back into the single document this
-			// non-streaming client asked for.
-			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
-			if err != nil {
-				g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
-				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
-				return
-			}
-			responseBody = collapsed
+		shaped := meta != nil && meta.Shaped
+		finalBody, ferr := g.finalizeNonStreamBody(responseBody, upstreamRoute, external, model, ids.Request, shaped)
+		if ferr != nil {
+			wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
+			return
 		}
 		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+		// The full body is parsed only when a fallback exists; otherwise
+		// this would tax every non-streaming response for nothing.
+		if servingPrimary && model == primaryModel && g.cfg.FallbackFor(primaryModel) != "" && detectContentRefusal(finalBody) {
+			if fallback := g.cfg.FallbackFor(primaryModel); fallback != "" {
+				if _, pinned := debugKeyOverrideFrom(r.Context()); !pinned {
+					resp.Body.Close()
+					if fallbackResp, fallbackRoute, fallbackErr := g.tryModelFallback(upstreamCtx, external, payload, ids, primaryModel, fallback); fallbackErr == nil && fallbackResp != nil {
+						fallbackRaw, readErr := io.ReadAll(io.LimitReader(fallbackResp.Body, 64<<20))
+						httpx.DrainAndClose(fallbackResp.Body)
+						if fallbackFinal, ferr2 := g.finalizeNonStreamBody(fallbackRaw, fallbackRoute, external, fallback, ids.Request, shaped); readErr == nil && ferr2 == nil {
+							g.logger.Info("content refusal fallback succeeded", "component", "upstream", "event", "refusal_fallback", "request_id", ids.Request, "from_model", primaryModel, "to_model", fallback)
+							upstreamRoute = fallbackRoute
+							model = fallback
+							finalBody = fallbackFinal
+							if meta != nil {
+								meta.Model = fallback
+								meta.Tier = string(upstreamRoute.Tier)
+								meta.Protocol = upstreamRoute.Protocol
+								meta.Effort = g.resolvedEffort(fallback, upstreamRoute.Tier, upstreamRoute.Protocol)
+							}
+							w.Header().Set("x-resolved-model", fallback)
+							g.armRefusal(ids.Session, primaryModel, fallback)
+							servingPrimary = false
+							if refusalProbe {
+								probeFailed = true
+							}
+						} else {
+							g.logger.Warn("content refusal fallback body unreadable; keeping primary refusal", "component", "upstream", "event", "refusal_fallback_failed", "request_id", ids.Request, "from_model", primaryModel, "to_model", fallback, "read_error", readErr, "convert_error", ferr2)
+							if refusalProbe {
+								probeFailed = true
+							}
+						}
+					} else {
+						g.logger.Warn("content refusal fallback failed; keeping primary refusal", "component", "upstream", "event", "refusal_fallback_failed", "request_id", ids.Request, "from_model", primaryModel, "to_model", fallback, "error", fallbackErr)
+						if fallbackResp != nil {
+							httpx.DrainAndClose(fallbackResp.Body)
+						}
+						if refusalProbe {
+							probeFailed = true
+						}
+					}
+				}
+			}
+		}
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
-		if external != upstreamRoute.Protocol {
-			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody)
-			if err != nil {
-				g.logger.Warn("response protocol conversion failed", "component", "conversion", "event", "response_conversion_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "target_protocol", external, "error", err)
-				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
-				return
-			}
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(responseBody)
+		_, _ = w.Write(finalBody)
+		if !servingPrimary {
+			g.refusals.consumed(ids.Session)
+		}
+		if refusalProbe && !probeFailed {
+			g.refusals.clear(ids.Session)
+		}
 	}
 }
 
@@ -494,6 +639,11 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 		if fallback := g.cfg.FallbackFor(model); fallback != "" {
 			if fallbackResp, fallbackUpstream, fallbackErr := g.trySystemOneFallback(upstreamCtx, body, ids, model, fallback); fallbackErr == nil && fallbackResp != nil && fallbackResp.StatusCode/100 == 2 {
 				g.logger.Info("model fallback succeeded", "component", "upstream", "event", "model_fallback", "request_id", ids.Request, "from_model", model, "to_model", fallback)
+				// Budget expiry can leave resp non-nil alongside err; drain the
+				// losing body before resp is overwritten by the fallback.
+				if resp != nil {
+					httpx.DrainAndClose(resp.Body)
+				}
 				resp, upstreamRoute, err = fallbackResp, fallbackUpstream, nil
 				model = fallback
 				if meta != nil {
@@ -654,6 +804,26 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		bodies[tier] = encoded
 	}
 	return bodies, nil
+}
+
+func (g *Gateway) finalizeNonStreamBody(responseBody []byte, upstreamRoute models.Route, external wire.Protocol, model, requestID string, shaped bool) ([]byte, error) {
+	if upstreamRoute.Anonymous || shaped {
+		collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
+		if err != nil {
+			g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", requestID, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
+			return nil, err
+		}
+		responseBody = collapsed
+	}
+	if external != upstreamRoute.Protocol {
+		converted, err := wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody)
+		if err != nil {
+			g.logger.Warn("response protocol conversion failed", "component", "conversion", "event", "response_conversion_failed", "request_id", requestID, "model", model, "source_protocol", upstreamRoute.Protocol, "target_protocol", external, "error", err)
+			return nil, err
+		}
+		responseBody = converted
+	}
+	return responseBody, nil
 }
 
 func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {

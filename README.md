@@ -261,7 +261,8 @@ global pool; `"*"` is an optional default override.
     "global-model": ["direct"]
   },
   "proxy_retry": { "max_attempts": 3, "interval_seconds": 2 },
-  "model_fallback": { "us-only-model": "global-model" }
+  "model_fallback": { "us-only-model": "global-model" },
+  "content_refusal": { "rounds": 3 }
 }
 ```
 
@@ -303,6 +304,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `proxy_health.disabled` | `false`; when true, no scheduled or verify-after-error probes (bookkeeping unaffected). |
 | `proxy_health.probe_interval_minutes` | `5`; bad-proxy recheck cadence, range 1–1440 (other probe tunables take defaults). |
 | `model_fallback`            | `{}`; single-hop `A→C` fallback on retryable pool exhaustion.              |
+| `content_refusal.rounds`    | `3`; session detour rounds after a content-filter refusal (0 = current turn only, max 20). |
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
